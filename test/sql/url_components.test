@@ -1,0 +1,87 @@
+# name: test/sql/url_components.test
+# description: url_components parses raw analytics URL input into a STRUCT, staying total over junk
+# group: [sql]
+
+require url_tools
+
+require json
+
+# Absolute URL: all fields populated; scheme without ':', fragment without '#'.
+query I
+SELECT url_components('https://example.com:8443/path/to?q=1&q=2&encoded=a%20b#frag');
+----
+{'scheme': https, 'hostname': example.com, 'path': /path/to, 'query_params': '{"q":"2","encoded":"a b"}', 'fragment': frag}
+
+# Non-special scheme keeps its authority.
+query I
+SELECT url_components('goal://counter/signup');
+----
+{'scheme': goal, 'hostname': counter, 'path': /signup, 'query_params': '{}', 'fragment': ''}
+
+# Relative path (SPA hit tracking sends `ym(id, 'hit', '/path?q=1')` as-is):
+# scheme/hostname are NULL, path/query_params/fragment parse per WHATWG.
+query I
+SELECT url_components('/search?q=%D0%BB&tab=products#top');
+----
+{'scheme': NULL, 'hostname': NULL, 'path': /search, 'query_params': '{"q":"л","tab":"products"}', 'fragment': top}
+
+query I
+SELECT url_components('/');
+----
+{'scheme': NULL, 'hostname': NULL, 'path': /, 'query_params': '{}', 'fragment': ''}
+
+# Unparseable input is NULL, not an error: junk prose, invalid host, bare word.
+query III
+SELECT url_components('https://временно не работает дозвон/'),
+       url_components('http://[invalid'),
+       url_components('not a url');
+----
+NULL	NULL	NULL
+
+# Protocol-relative '//host/path' is ambiguous without a base: NULL rather than
+# misreading the host as a path.
+query I
+SELECT url_components('//example.com/path');
+----
+NULL
+
+# Empty string and NULL propagate to NULL.
+query II
+SELECT url_components(''), url_components(NULL);
+----
+NULL	NULL
+
+# Struct fields are individually addressable.
+query II
+SELECT (url_components('https://example.com/a?b=1')).path,
+       (url_components('/a?b=1')).query_params;
+----
+/a	{"b":"1"}
+
+# Bulk parse over poison rows completes: one junk value must not fail the scan.
+query I
+SELECT count(url_components(u)) FROM (VALUES
+    ('https://example.com/?a=b'),
+    ('/relative?c=d'),
+    ('junk value'),
+    (''),
+    (NULL)
+) t(u);
+----
+2
+
+# Query params decode per WHATWG form semantics: last wins, '+' is space,
+# invalid percent-escapes pass through, invalid UTF-8 is sanitized to U+FFFD.
+query IIII
+SELECT json_extract_string((url_components('https://example.com/?plus=a+b')).query_params, '$.plus'),
+       json_extract_string((url_components('https://example.com/?bad=%ZZ')).query_params, '$.bad'),
+       json_extract_string((url_components('https://example.com/?a=%D0')).query_params, '$.a') = chr(65533),
+       json_extract_string((url_components('/p?a=%D0')).query_params, '$.a') = chr(65533);
+----
+a b	%ZZ	true	true
+
+# The connection is still usable after junk input (no invalidation).
+query I
+SELECT 1;
+----
+1

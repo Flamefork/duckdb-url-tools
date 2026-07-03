@@ -1,0 +1,57 @@
+# name: test/sql/query_params_from_string.test
+# description: query_params_from_string parses a bare query string into a decoded JSON object
+# group: [sql]
+
+require url_tools
+
+require json
+
+# Bare query string, no URL around it (tracking params, url_tags, referrer fields).
+query I
+SELECT query_params_from_string('utm_source=yandex&utm_medium=cpc&utm_campaign=%D0%BB');
+----
+{"utm_source":"yandex","utm_medium":"cpc","utm_campaign":"л"}
+
+# A leading '?' is tolerated.
+query I
+SELECT query_params_from_string('?a=1&b=2');
+----
+{"a":"1","b":"2"}
+
+# WHATWG form semantics: '+' as space, valueless keys, '=' inside values, repeats last-wins.
+query I
+SELECT query_params_from_string('plus=a+b&flag&eq=a=b&dup=1&dup=2');
+----
+{"plus":"a b","flag":"","eq":"a=b","dup":"2"}
+
+# Empty string yields '{}'; NULL propagates.
+query II
+SELECT query_params_from_string(''), query_params_from_string(NULL);
+----
+{}	NULL
+
+# Custom pair separator (e.g. '|' in Adjust deeplink labels), same decode semantics:
+# '+' as space, key ends at the first '=', repeats last-wins, empty segments skipped.
+query I
+SELECT query_params_from_string('foo=bar|plus=a+b%20c|eq=a=b||dup=1|dup=2', '|');
+----
+{"foo":"bar","plus":"a b c","eq":"a=b","dup":"2"}
+
+# A percent-encoded '&' inside a value survives a non-'&' separator.
+query I
+SELECT query_params_from_string('a=x%26y|b=2', '|');
+----
+{"a":"x&y","b":"2"}
+
+# Separator is a substring, not a character set; explicit '&' matches the 1-arg form.
+query II
+SELECT query_params_from_string('a=1||b=2', '||'),
+       query_params_from_string('a=1&b=2', '&') = query_params_from_string('a=1&b=2');
+----
+{"a":"1","b":"2"}	true
+
+# Empty separator is a usage error.
+statement error
+SELECT query_params_from_string('a=1', '');
+----
+Invalid Input Error: query_params_from_string: separator must not be empty

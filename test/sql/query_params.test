@@ -1,0 +1,40 @@
+# name: test/sql/query_params.test
+# description: query_params extracts a decoded JSON object of query parameters from a URL
+# group: [sql]
+
+require url_tools
+
+require json
+
+# Absolute URL of any scheme, including custom app schemes (deeplinks).
+query II
+SELECT query_params('https://example.com/p?utm_source=yandex&utm_medium=cpc'),
+       query_params('myapp://open?screen=cart&promo=x');
+----
+{"utm_source":"yandex","utm_medium":"cpc"}	{"screen":"cart","promo":"x"}
+
+# Relative path input.
+query I
+SELECT query_params('/search?q=1&tab=products');
+----
+{"q":"1","tab":"products"}
+
+# Values decode per WHATWG form semantics: percent-escapes, '+' as space, repeats last-wins.
+query I
+SELECT query_params('https://example.com/?a=%D0%BB&plus=a+b&a=%20x');
+----
+{"a":" x","plus":"a b"}
+
+# No query part or unparseable input yields '{}' so downstream JSON access stays uniform.
+query III
+SELECT query_params('https://example.com/path'),
+       query_params('not a url at all'),
+       query_params('');
+----
+{}	{}	{}
+
+# NULL propagates.
+query I
+SELECT query_params(NULL);
+----
+NULL

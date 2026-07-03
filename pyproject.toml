@@ -1,0 +1,12 @@
+[project]
+name = "duckdb-url-tools"
+version = "0.1.0"
+description = "venv for formatting etc"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "black>=25.9.0",
+    "clang-format==11.0.1",
+    "cmake-format>=0.6.13",
+    "duckdb>=1.5.3",
+]
