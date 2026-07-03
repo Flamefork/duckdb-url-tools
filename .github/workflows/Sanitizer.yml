@@ -3,8 +3,8 @@
 # default-on for a clang Debug build of DuckDB) and runs the SQLLogic suite plus
 # the hypothesis property/fuzz harness against that instrumented build. This is
 # the safety net for the vendored ada parser: url_tools feeds it arbitrary
-# untrusted analytics input, and a memory bug there is invisible in a release
-# build but trapped here.
+# untrusted input, and a memory bug there is invisible in a release build but
+# trapped here.
 #
 name: Sanitizer
 

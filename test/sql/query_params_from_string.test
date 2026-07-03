@@ -30,7 +30,7 @@ SELECT query_params_from_string(''), query_params_from_string(NULL);
 ----
 {}	NULL
 
-# Custom pair separator (e.g. '|' in Adjust deeplink labels), same decode semantics:
+# Custom pair separator, same decode semantics:
 # '+' as space, key ends at the first '=', repeats last-wins, empty segments skipped.
 query I
 SELECT query_params_from_string('foo=bar|plus=a+b%20c|eq=a=b||dup=1|dup=2', '|');

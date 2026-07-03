@@ -1,5 +1,5 @@
 # name: test/sql/url_components.test
-# description: url_components parses raw analytics URL input into a STRUCT, staying total over junk
+# description: url_components parses raw URL input into a STRUCT, staying total over junk
 # group: [sql]
 
 require url_tools
@@ -18,7 +18,7 @@ SELECT url_components('goal://counter/signup');
 ----
 {'scheme': goal, 'hostname': counter, 'path': /signup, 'query_params': '{}', 'fragment': ''}
 
-# Relative path (SPA hit tracking sends `ym(id, 'hit', '/path?q=1')` as-is):
+# Relative path input:
 # scheme/hostname are NULL, path/query_params/fragment parse per WHATWG.
 query I
 SELECT url_components('/search?q=%D0%BB&tab=products#top');

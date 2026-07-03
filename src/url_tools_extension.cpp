@@ -225,9 +225,9 @@ static string_t UrlToolsWriteQueryParams(Vector &result, std::string_view query,
 }
 
 // Shared URL-input handling: absolute URLs of any scheme parse as-is; a single
-// leading slash is a relative path (SPA hit tracking sends `ym(id, 'hit', '/path')`
-// as-is), parsed via a placeholder scheme; a double slash is a protocol-relative
-// URL, which is ambiguous without a base and treated as unparseable.
+// leading slash is a relative path (raw URL logs often carry bare paths), parsed
+// via a placeholder scheme; a double slash is a protocol-relative URL, which is
+// ambiguous without a base and treated as unparseable.
 struct UrlToolsParsedInput {
 	ada::result<ada::url_aggregator> url;
 	bool relative;
@@ -244,7 +244,7 @@ static UrlToolsParsedInput UrlToolsParseInput(std::string_view raw, UrlToolsLoca
 }
 
 // url_components(varchar) -> STRUCT(scheme, hostname, path, query_params JSON, fragment).
-// Total over raw analytics input: unparseable values yield a NULL row instead of an
+// Total over arbitrary input: unparseable values yield a NULL row instead of an
 // error, so one junk value cannot fail a whole scan.
 inline void UrlComponentsScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto state_ptr = ExecuteFunctionState::GetFunctionState(state);
@@ -345,8 +345,7 @@ inline void QueryParamsFromStringScalarFun(DataChunk &args, ExpressionState &sta
 	});
 }
 
-// query_params_from_string(varchar, varchar) -> same, with a custom pair separator
-// (e.g. '|' for Adjust deeplink labels).
+// query_params_from_string(varchar, varchar) -> same, with a custom pair separator.
 inline void QueryParamsFromStringSeparatorScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto state_ptr = ExecuteFunctionState::GetFunctionState(state);
 	D_ASSERT(state_ptr);
