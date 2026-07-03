@@ -1,0 +1,614 @@
+{
+  "schema_version": 1,
+  "environment": {
+    "timestamp": "2026-07-03T12:41:52+00:00",
+    "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "python": "3.14.3",
+    "duckdb": "1.5.4",
+    "cpu_count": 12,
+    "git_commit": "8e4252c"
+  },
+  "results": [
+    {
+      "min_ms": 73.799,
+      "median_ms": 74.881,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "host",
+      "target": "url_tools",
+      "size": "100k",
+      "threads": 1
+    },
+    {
+      "min_ms": 75.663,
+      "median_ms": 76.027,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "host",
+      "target": "url_tools",
+      "size": "100k",
+      "threads": 8
+    },
+    {
+      "min_ms": 733.321,
+      "median_ms": 733.942,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "host",
+      "target": "url_tools",
+      "size": "1m",
+      "threads": 1
+    },
+    {
+      "min_ms": 109.083,
+      "median_ms": 109.726,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "host",
+      "target": "url_tools",
+      "size": "1m",
+      "threads": 8
+    },
+    {
+      "min_ms": 32.576,
+      "median_ms": 32.738,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "host",
+      "target": "netquack",
+      "size": "100k",
+      "threads": 1
+    },
+    {
+      "min_ms": 34.999,
+      "median_ms": 35.052,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "host",
+      "target": "netquack",
+      "size": "100k",
+      "threads": 8
+    },
+    {
+      "min_ms": 321.237,
+      "median_ms": 325.88,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "host",
+      "target": "netquack",
+      "size": "1m",
+      "threads": 1
+    },
+    {
+      "min_ms": 45.231,
+      "median_ms": 46.045,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "host",
+      "target": "netquack",
+      "size": "1m",
+      "threads": 8
+    },
+    {
+      "min_ms": 46.183,
+      "median_ms": 46.317,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "host",
+      "target": "native",
+      "size": "100k",
+      "threads": 1
+    },
+    {
+      "min_ms": 48.445,
+      "median_ms": 48.742,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "host",
+      "target": "native",
+      "size": "100k",
+      "threads": 8
+    },
+    {
+      "min_ms": 453.566,
+      "median_ms": 458.935,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "host",
+      "target": "native",
+      "size": "1m",
+      "threads": 1
+    },
+    {
+      "min_ms": 81.401,
+      "median_ms": 84.546,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "host",
+      "target": "native",
+      "size": "1m",
+      "threads": 8
+    },
+    {
+      "min_ms": 73.587,
+      "median_ms": 74.253,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "path",
+      "target": "url_tools",
+      "size": "100k",
+      "threads": 1
+    },
+    {
+      "min_ms": 76.451,
+      "median_ms": 76.836,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "path",
+      "target": "url_tools",
+      "size": "100k",
+      "threads": 8
+    },
+    {
+      "min_ms": 737.639,
+      "median_ms": 744.846,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "path",
+      "target": "url_tools",
+      "size": "1m",
+      "threads": 1
+    },
+    {
+      "min_ms": 108.977,
+      "median_ms": 109.273,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "path",
+      "target": "url_tools",
+      "size": "1m",
+      "threads": 8
+    },
+    {
+      "min_ms": 32.613,
+      "median_ms": 33.088,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "path",
+      "target": "netquack",
+      "size": "100k",
+      "threads": 1
+    },
+    {
+      "min_ms": 36.258,
+      "median_ms": 37.122,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "path",
+      "target": "netquack",
+      "size": "100k",
+      "threads": 8
+    },
+    {
+      "min_ms": 324.217,
+      "median_ms": 326.106,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "path",
+      "target": "netquack",
+      "size": "1m",
+      "threads": 1
+    },
+    {
+      "min_ms": 46.198,
+      "median_ms": 46.855,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "path",
+      "target": "netquack",
+      "size": "1m",
+      "threads": 8
+    },
+    {
+      "min_ms": 42.243,
+      "median_ms": 43.247,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "path",
+      "target": "native",
+      "size": "100k",
+      "threads": 1
+    },
+    {
+      "min_ms": 45.735,
+      "median_ms": 46.469,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "path",
+      "target": "native",
+      "size": "100k",
+      "threads": 8
+    },
+    {
+      "min_ms": 420.473,
+      "median_ms": 428.89,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "path",
+      "target": "native",
+      "size": "1m",
+      "threads": 1
+    },
+    {
+      "min_ms": 74.865,
+      "median_ms": 76.976,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "path",
+      "target": "native",
+      "size": "1m",
+      "threads": 8
+    },
+    {
+      "min_ms": 81.302,
+      "median_ms": 83.046,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "query_param",
+      "target": "url_tools",
+      "size": "100k",
+      "threads": 1
+    },
+    {
+      "min_ms": 83.604,
+      "median_ms": 84.226,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "query_param",
+      "target": "url_tools",
+      "size": "100k",
+      "threads": 8
+    },
+    {
+      "min_ms": 815.143,
+      "median_ms": 818.774,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "query_param",
+      "target": "url_tools",
+      "size": "1m",
+      "threads": 1
+    },
+    {
+      "min_ms": 117.833,
+      "median_ms": 119.146,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "query_param",
+      "target": "url_tools",
+      "size": "1m",
+      "threads": 8
+    },
+    {
+      "min_ms": 49.41,
+      "median_ms": 50.059,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "query_param",
+      "target": "netquack",
+      "size": "100k",
+      "threads": 1
+    },
+    {
+      "min_ms": 51.876,
+      "median_ms": 52.122,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "query_param",
+      "target": "netquack",
+      "size": "100k",
+      "threads": 8
+    },
+    {
+      "min_ms": 491.439,
+      "median_ms": 493.195,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "query_param",
+      "target": "netquack",
+      "size": "1m",
+      "threads": 1
+    },
+    {
+      "min_ms": 71.175,
+      "median_ms": 71.946,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "query_param",
+      "target": "netquack",
+      "size": "1m",
+      "threads": 8
+    },
+    {
+      "min_ms": 33.426,
+      "median_ms": 33.558,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "query_param",
+      "target": "native",
+      "size": "100k",
+      "threads": 1
+    },
+    {
+      "min_ms": 36.228,
+      "median_ms": 37.229,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "query_param",
+      "target": "native",
+      "size": "100k",
+      "threads": 8
+    },
+    {
+      "min_ms": 333.464,
+      "median_ms": 336.204,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "query_param",
+      "target": "native",
+      "size": "1m",
+      "threads": 1
+    },
+    {
+      "min_ms": 47.657,
+      "median_ms": 48.211,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "query_param",
+      "target": "native",
+      "size": "1m",
+      "threads": 8
+    },
+    {
+      "min_ms": 69.662,
+      "median_ms": 70.487,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "query_params_all",
+      "target": "url_tools",
+      "size": "100k",
+      "threads": 1
+    },
+    {
+      "min_ms": 72.45,
+      "median_ms": 72.868,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "query_params_all",
+      "target": "url_tools",
+      "size": "100k",
+      "threads": 8
+    },
+    {
+      "min_ms": 696.377,
+      "median_ms": 699.145,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "query_params_all",
+      "target": "url_tools",
+      "size": "1m",
+      "threads": 1
+    },
+    {
+      "min_ms": 102.788,
+      "median_ms": 103.504,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "query_params_all",
+      "target": "url_tools",
+      "size": "1m",
+      "threads": 8
+    },
+    {
+      "min_ms": 326.925,
+      "median_ms": 335.624,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "query_params_all",
+      "target": "netquack",
+      "size": "100k",
+      "threads": 1
+    },
+    {
+      "min_ms": 92.607,
+      "median_ms": 97.319,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "query_params_all",
+      "target": "netquack",
+      "size": "100k",
+      "threads": 8
+    },
+    {
+      "min_ms": 3372.589,
+      "median_ms": 3386.627,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "query_params_all",
+      "target": "netquack",
+      "size": "1m",
+      "threads": 1
+    },
+    {
+      "min_ms": 861.658,
+      "median_ms": 870.49,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "query_params_all",
+      "target": "netquack",
+      "size": "1m",
+      "threads": 8
+    },
+    {
+      "min_ms": 176.389,
+      "median_ms": 179.163,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "query_params_all",
+      "target": "native",
+      "size": "100k",
+      "threads": 1
+    },
+    {
+      "min_ms": 198.725,
+      "median_ms": 199.328,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "query_params_all",
+      "target": "native",
+      "size": "100k",
+      "threads": 8
+    },
+    {
+      "min_ms": 1784.763,
+      "median_ms": 1793.019,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "query_params_all",
+      "target": "native",
+      "size": "1m",
+      "threads": 1
+    },
+    {
+      "min_ms": 255.577,
+      "median_ms": 262.999,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "query_params_all",
+      "target": "native",
+      "size": "1m",
+      "threads": 8
+    },
+    {
+      "min_ms": 82.388,
+      "median_ms": 83.085,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "components",
+      "target": "url_tools",
+      "size": "100k",
+      "threads": 1
+    },
+    {
+      "min_ms": 97.334,
+      "median_ms": 98.321,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "components",
+      "target": "url_tools",
+      "size": "100k",
+      "threads": 8
+    },
+    {
+      "min_ms": 839.858,
+      "median_ms": 846.726,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "components",
+      "target": "url_tools",
+      "size": "1m",
+      "threads": 1
+    },
+    {
+      "min_ms": 125.423,
+      "median_ms": 125.945,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "components",
+      "target": "url_tools",
+      "size": "1m",
+      "threads": 8
+    },
+    {
+      "min_ms": 63.408,
+      "median_ms": 63.756,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "params_from_string",
+      "target": "url_tools",
+      "size": "100k",
+      "threads": 1
+    },
+    {
+      "min_ms": 66.356,
+      "median_ms": 66.968,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "params_from_string",
+      "target": "url_tools",
+      "size": "100k",
+      "threads": 8
+    },
+    {
+      "min_ms": 638.763,
+      "median_ms": 642.519,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "params_from_string",
+      "target": "url_tools",
+      "size": "1m",
+      "threads": 1
+    },
+    {
+      "min_ms": 93.939,
+      "median_ms": 95.069,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "params_from_string",
+      "target": "url_tools",
+      "size": "1m",
+      "threads": 8
+    },
+    {
+      "min_ms": 156.041,
+      "median_ms": 157.556,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "params_from_string",
+      "target": "native",
+      "size": "100k",
+      "threads": 1
+    },
+    {
+      "min_ms": 181.533,
+      "median_ms": 184.607,
+      "runs": 5,
+      "row_count": 100000,
+      "operation": "params_from_string",
+      "target": "native",
+      "size": "100k",
+      "threads": 8
+    },
+    {
+      "min_ms": 1575.737,
+      "median_ms": 1579.556,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "params_from_string",
+      "target": "native",
+      "size": "1m",
+      "threads": 1
+    },
+    {
+      "min_ms": 219.545,
+      "median_ms": 221.335,
+      "runs": 5,
+      "row_count": 1000000,
+      "operation": "params_from_string",
+      "target": "native",
+      "size": "1m",
+      "threads": 8
+    }
+  ]
+}

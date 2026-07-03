@@ -6,5 +6,7 @@ duckdb_unittest_tempdir/
 testext
 __pycache__
 .hypothesis
+bench/data/
+bench/results/latest.json
 .Rhistory
 .venv
