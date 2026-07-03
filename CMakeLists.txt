@@ -11,9 +11,11 @@ project(${TARGET_NAME})
 set(CMAKE_CXX_STANDARD "17" CACHE STRING "C++ standard to enforce")
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-include_directories(src/include)
+# Vendored code lives in third_party/ so the format/tidy gates (scoped to src/
+# and test/) never touch it.
+include_directories(src/include third_party third_party/ada)
 
-set(EXTENSION_SOURCES src/ada.cpp src/url_tools_extension.cpp)
+set(EXTENSION_SOURCES third_party/ada/ada.cpp src/url_tools_extension.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

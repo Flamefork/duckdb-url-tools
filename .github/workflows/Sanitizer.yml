@@ -1,0 +1,82 @@
+#
+# Builds the extension with AddressSanitizer + UndefinedBehaviorSanitizer (both
+# default-on for a clang Debug build of DuckDB) and runs the SQLLogic suite plus
+# the hypothesis property/fuzz harness against that instrumented build. This is
+# the safety net for the vendored ada parser: url_tools feeds it arbitrary
+# untrusted analytics input, and a memory bug there is invisible in a release
+# build but trapped here.
+#
+name: Sanitizer
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Weekly deep fuzz pass: every push/PR runs a small example budget for fast
+  # feedback, so the thorough sweep lives on a schedule. Monday 04:00 UTC.
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  # event_name is in the key so a routine push to main never cancels the
+  # in-flight weekly `schedule` deep run (both resolve to refs/heads/main).
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  sanitizer:
+    name: ASan + UBSan (linux_amd64)
+    runs-on: ubuntu-latest
+    env:
+      # Standalone clang build: no vcpkg, no Docker, no external libraries
+      # (ada and ankerl are vendored in third_party/; yyjson comes from DuckDB).
+      GEN: ninja
+      CC: clang
+      CXX: clang++
+      # Leak detection is noisy against the DuckDB runtime; this job targets
+      # memory-safety and UB, not leaks.
+      ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y -qq
+          sudo apt-get install -y -qq ninja-build clang
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      # Cache compiled objects across runs. DuckDB core is the bulk of the
+      # debug build and rarely changes between pushes; only the extension
+      # sources recompile, so warm-cache rebuilds are dominated by the link
+      # step. The sanitizer compile flags are part of the ccache hash, so this
+      # cache never collides with the release pipeline's ccache.
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2.23
+        with:
+          key: sanitizer-asan-ubsan
+          max-size: 1G
+
+      - name: Build (Debug = ASan + UBSan)
+        env:
+          EXT_FLAGS: -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        run: make debug
+
+      - name: SQLLogic tests under sanitizers
+        run: make test_debug
+
+      # Example budget is tiered: push/PR runs a fast ~100-example sweep for
+      # quick feedback; the weekly `schedule` run cranks it up for a deep fuzz
+      # pass. Cost is linear in the example count.
+      - name: Property + fuzz harness under sanitizers
+        env:
+          URL_TOOLS_DUCKDB_BIN: build/debug/duckdb
+          URL_TOOLS_EXTENSION: build/debug/extension/url_tools/url_tools.duckdb_extension
+          URL_TOOLS_PROPERTY_MAX_EXAMPLES: ${{ github.event_name == 'schedule' && '2000' || '100' }}
+        run: uv run --frozen test/property/url_tools_property.py
