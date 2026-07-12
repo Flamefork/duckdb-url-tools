@@ -80,3 +80,9 @@ jobs:
           URL_TOOLS_EXTENSION: build/debug/extension/url_tools/url_tools.duckdb_extension
           URL_TOOLS_PROPERTY_MAX_EXAMPLES: ${{ github.event_name == 'schedule' && '2000' || '100' }}
         run: uv run --frozen test/property/url_tools_property.py
+
+      - name: WPT URL corpus against url_components
+        env:
+          URL_TOOLS_DUCKDB_BIN: build/debug/duckdb
+          URL_TOOLS_EXTENSION: build/debug/extension/url_tools/url_tools.duckdb_extension
+        run: uv run --frozen test/wpt/run_wpt_corpus.py

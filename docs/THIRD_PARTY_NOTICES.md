@@ -37,6 +37,16 @@ Copyright 2023 Yagiz Nizipli and Daniel Lemire.
 
 Copyright 2022 Martin Leitner-Ankerl.
 
+### web-platform-tests URL corpus
+
+- Upstream: https://github.com/web-platform-tests/wpt
+- Version: commit `181476aa16e8b28a07698bef3a0275fa53dd22e5` (file `url/resources/urltestdata.json`)
+- Files: `test/wpt/urltestdata.json` (test data only; not compiled into any binary)
+- License: The 3-Clause BSD License
+- License text: `LICENSE.md` in the upstream repository
+
+Copyright © web-platform-tests contributors.
+
 ## Release Binaries
 
 DuckDB loadable extension binaries are linked with DuckDB build artifacts and

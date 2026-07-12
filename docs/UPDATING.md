@@ -41,6 +41,11 @@ fresh upstream release and sync `docs/THIRD_PARTY_NOTICES.md`.
 4. Run `uv run make verify`, then the property harness (see above). ada parses
    arbitrary untrusted input, so also confirm the Sanitizer CI run on the push
    is green — it exercises the parser under ASan + UBSan.
+5. Refresh the pinned WPT URL corpus in the same commit (re-fetch
+   `url/resources/urltestdata.json`, update the commit in
+   `docs/THIRD_PARTY_NOTICES.md`) and run `test/wpt/run_wpt_corpus.py`: a new ada
+   may legitimately turn allowlisted cases green, and the runner fails until the
+   stale `KNOWN_ADA_DEVIATIONS` entries are deleted (see `test/README.md`).
 
 ### ankerl unordered_dense
 
