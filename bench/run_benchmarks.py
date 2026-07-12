@@ -49,9 +49,7 @@ def connect(target_label: str) -> duckdb.DuckDBPyConnection:
         con.execute(f"LOAD {extension}")
     if target["load_url_tools"]:
         if not URL_TOOLS_EXTENSION_PATH.exists():
-            raise RuntimeError(
-                f"{URL_TOOLS_EXTENSION_PATH} not found; run `uv run make release` first"
-            )
+            raise RuntimeError(f"{URL_TOOLS_EXTENSION_PATH} not found; run `uv run make release` first")
         con.execute(f"LOAD '{URL_TOOLS_EXTENSION_PATH}'")
     return con
 
@@ -77,11 +75,7 @@ def gate_rows_sql(column: str, values: list[str]) -> str:
 # comparison of different work.
 def run_gate(target_labels: set[str]) -> None:
     for operation, spec in OPERATIONS.items():
-        targets = {
-            label: expr
-            for label, expr in spec["targets"].items()
-            if label in target_labels
-        }
+        targets = {label: expr for label, expr in spec["targets"].items() if label in target_labels}
         if len(targets) < 2:
             continue
         gate_values = GATE_URLS if spec["input"] == "urls" else GATE_QUERY_STRINGS
@@ -102,18 +96,14 @@ def run_gate(target_labels: set[str]) -> None:
     print(f"correctness gate passed ({', '.join(sorted(target_labels))})")
 
 
-def run_case(
-    target_label: str, expr: str, spec: dict, size: str, threads: int, runs: int
-) -> dict:
+def run_case(target_label: str, expr: str, spec: dict, size: str, threads: int, runs: int) -> dict:
     con = connect(target_label)
     con.execute(f"SET threads = {threads}")
     con.execute(
         f"CREATE OR REPLACE TEMP TABLE _bench_in AS "
         f"SELECT {spec['column']} FROM read_parquet('{data_path(spec['input'], size)}')"
     )
-    timed_sql = (
-        f"CREATE OR REPLACE TEMP TABLE _bench_out AS SELECT {expr} AS r FROM _bench_in"
-    )
+    timed_sql = f"CREATE OR REPLACE TEMP TABLE _bench_out AS SELECT {expr} AS r FROM _bench_in"
     con.execute(timed_sql)  # warmup, not recorded
     times_ms = []
     for _ in range(runs):
@@ -132,9 +122,7 @@ def run_case(
 def print_summary(results: list[dict]) -> None:
     by_case: dict[tuple, dict[str, float]] = {}
     for row in results:
-        by_case.setdefault((row["operation"], row["size"], row["threads"]), {})[
-            row["target"]
-        ] = row["min_ms"]
+        by_case.setdefault((row["operation"], row["size"], row["threads"]), {})[row["target"]] = row["min_ms"]
     header = f"{'operation':<20} {'size':>5} {'thr':>3} {'url_tools':>10} {'netquack':>10} {'nq/ut':>6} {'native':>10} {'nat/ut':>7}"
     print()
     print(header)
@@ -178,9 +166,7 @@ def main() -> None:
         if size not in SIZES:
             raise SystemExit(f"unknown size {size!r}; known: {', '.join(SIZES)}")
     thread_modes = [int(t) for t in args.threads.split(",")]
-    operations = {
-        name: spec for name, spec in OPERATIONS.items() if args.filter in name
-    }
+    operations = {name: spec for name, spec in OPERATIONS.items() if args.filter in name}
     if not operations:
         raise SystemExit(f"no operations match filter {args.filter!r}")
 

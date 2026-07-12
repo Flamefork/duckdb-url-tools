@@ -11,10 +11,7 @@ CaseKey = tuple[str, str, str, int]
 
 def load_results(path: Path) -> dict[CaseKey, dict]:
     payload = json.loads(path.read_text())
-    return {
-        (row["operation"], row["target"], row["size"], row["threads"]): row
-        for row in payload["results"]
-    }
+    return {(row["operation"], row["target"], row["size"], row["threads"]): row for row in payload["results"]}
 
 
 def main() -> int:
@@ -34,9 +31,7 @@ def main() -> int:
     for key in sorted(set(baseline) - set(latest)):
         print(f"note: {'/'.join(str(part) for part in key)} is in baseline only")
     for key in sorted(set(latest) - set(baseline)):
-        print(
-            f"note: {'/'.join(str(part) for part in key)} is in latest only (no baseline)"
-        )
+        print(f"note: {'/'.join(str(part) for part in key)} is in latest only (no baseline)")
 
     regressions = []
     header = f"{'case':<48} {'base_ms':>9} {'latest_ms':>9} {'delta':>8}"
@@ -51,33 +46,21 @@ def main() -> int:
         # Only the url_tools rows gate: netquack/native drift is machine noise
         # we display for context, not a regression in this repository's code.
         gates = key[1] == "url_tools"
-        regressed = (
-            delta_pct > args.tolerance_pct
-            and (latest_ms - base_ms) > args.min_effect_ms
-        )
+        regressed = delta_pct > args.tolerance_pct and (latest_ms - base_ms) > args.min_effect_ms
         marker = ""
         if regressed:
             marker = " REGRESSION" if gates else " (context)"
             if gates:
                 regressions.append(case_label)
-        elif (
-            delta_pct < -args.tolerance_pct
-            and (base_ms - latest_ms) > args.min_effect_ms
-        ):
+        elif delta_pct < -args.tolerance_pct and (base_ms - latest_ms) > args.min_effect_ms:
             marker = " improved"
-        print(
-            f"{case_label:<48} {base_ms:>9.1f} {latest_ms:>9.1f} {delta_pct:>+7.1f}%{marker}"
-        )
+        print(f"{case_label:<48} {base_ms:>9.1f} {latest_ms:>9.1f} {delta_pct:>+7.1f}%{marker}")
 
     if regressions:
-        print(
-            f"\n{len(regressions)} url_tools regression(s) beyond {args.tolerance_pct}%:"
-        )
+        print(f"\n{len(regressions)} url_tools regression(s) beyond {args.tolerance_pct}%:")
         for case_label in regressions:
             print(f"  {case_label}")
-        print(
-            "stored baselines drift with machine state: treat as a hint, confirm by re-running both builds"
-        )
+        print("stored baselines drift with machine state: treat as a hint, confirm by re-running both builds")
         return 1
     print(f"\nno url_tools regressions beyond {args.tolerance_pct}%")
     return 0

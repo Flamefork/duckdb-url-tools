@@ -10,3 +10,4 @@ bench/data/
 bench/results/latest.json
 .Rhistory
 .venv
+.cache/

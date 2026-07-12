@@ -5,14 +5,7 @@ DATA_DIR = BENCH_DIR / "data"
 RESULTS_DIR = BENCH_DIR / "results"
 PROJECT_ROOT = BENCH_DIR.parent
 
-URL_TOOLS_EXTENSION_PATH = (
-    PROJECT_ROOT
-    / "build"
-    / "release"
-    / "extension"
-    / "url_tools"
-    / "url_tools.duckdb_extension"
-)
+URL_TOOLS_EXTENSION_PATH = PROJECT_ROOT / "build" / "release" / "extension" / "url_tools" / "url_tools.duckdb_extension"
 
 SCHEMA_VERSION = 1
 BENCH_SEED = 42

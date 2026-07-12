@@ -85,11 +85,7 @@ def make_query(rnd: random.Random, with_utm: bool) -> str:
         keys = ["utm_source"] + keys
     pairs = []
     for key in keys:
-        value = (
-            rnd.choice(PHRASE_VALUES)
-            if rnd.random() < 0.25
-            else rnd.choice(PLAIN_VALUES)
-        )
+        value = rnd.choice(PHRASE_VALUES) if rnd.random() < 0.25 else rnd.choice(PLAIN_VALUES)
         pairs.append((key, value))
     return urlencode(pairs)
 
@@ -101,11 +97,7 @@ def make_path(rnd: random.Random) -> str:
 def make_url(rnd: random.Random) -> str:
     shape = rnd.random()
     if shape < 0.55:
-        query = (
-            f"?{make_query(rnd, with_utm=rnd.random() < 0.7)}"
-            if rnd.random() < 0.85
-            else ""
-        )
+        query = f"?{make_query(rnd, with_utm=rnd.random() < 0.7)}" if rnd.random() < 0.85 else ""
         fragment = "#frag" if rnd.random() < 0.2 else ""
         return f"{rnd.choice(SCHEMES)}://{rnd.choice(HOSTS)}{make_path(rnd)}{query}{fragment}"
     if shape < 0.63:
