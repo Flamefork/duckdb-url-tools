@@ -1,23 +1,51 @@
-# Extension updating 
-When cloning this template, the target version of DuckDB should be the latest stable release of DuckDB. However, there 
-will inevitably come a time when a new DuckDB is released and the extension repository needs updating. This process goes
-as follows:
+# Updating dependencies
 
-- Bump submodules
-  - `./duckdb` should be set to latest tagged release
-  - `./extension-ci-tools` should be set to updated branch corresponding to latest DuckDB release. So if you're building for DuckDB `v1.1.0` there will be a branch in `extension-ci-tools` named `v1.1.0` to which you should check out. 
-- Bump versions in `./github/workflows`
-  - `duckdb_version` input in `duckdb-stable-build` job in `MainDistributionPipeline.yml` should be set to latest tagged release
-  - `duckdb_version` input in `duckdb-stable-deploy` job in `MainDistributionPipeline.yml` should be set to latest tagged release
-  - the reusable workflow `duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml` for the `duckdb-stable-build` job should be set to latest tagged release
+## DuckDB version bump
 
-# API changes
-DuckDB extensions built with this extension template are built against the internal C++ API of DuckDB. This API is not guaranteed to be stable.
-What this means for extension development is that when updating your extensions DuckDB target version using the above steps, you may run into the fact that your extension no longer builds properly.
+When a new DuckDB stable release comes out:
 
-Currently, DuckDB does not (yet) provide a specific change log for these API changes, but it is generally not too hard to figure out what has changed.
+1. Bump both submodules:
+   - `duckdb` → the new release tag:
+     `git -C duckdb fetch --tags && git -C duckdb checkout vX.Y.Z`
+   - `extension-ci-tools` → the branch matching that release:
+     `git -C extension-ci-tools fetch && git -C extension-ci-tools checkout vX.Y.Z`
+2. Update every version pin in `.github/workflows/MainDistributionPipeline.yml`.
+   Both jobs (`duckdb-stable-build` and `code-quality-check`) pin the release
+   tag in three places each: the `uses:` ref of the reusable workflow, and the
+   `duckdb_version` and `ci_tools_version` inputs. All six carry the same tag,
+   so a global search-and-replace of the old tag is the reliable way.
+   (`Sanitizer.yml` pins no version — it builds DuckDB from the submodule.)
+3. Rebuild and run the full gate: `uv run make verify`.
+4. Run the property harness against the fresh build:
+   `uv run --frozen test/property/url_tools_property.py`.
+5. If the build breaks: extensions link against DuckDB's internal C++ API,
+   which is not stable across releases. To find what changed, use DuckDB's
+   [release notes](https://github.com/duckdb/duckdb/releases), the history of
+   [core extension patches](https://github.com/duckdb/duckdb/commits/main/.github/patches/extensions),
+   and the git history of the relevant header in `duckdb/src/include/`.
+6. Commit the submodule bumps and the workflow edits together, then push and
+   confirm the distribution pipeline is green.
 
-For figuring out how and why the C++ API changed, we recommend using the following resources:
-- DuckDB's [Release Notes](https://github.com/duckdb/duckdb/releases)
-- DuckDB's history of [Core extension patches](https://github.com/duckdb/duckdb/commits/main/.github/patches/extensions)
-- The git history of the relevant C++ Header file of the API that has changed
+## Vendored dependencies (third_party/)
+
+`third_party/` is never edited by hand. Updates replace whole files with a
+fresh upstream release and sync `docs/THIRD_PARTY_NOTICES.md`.
+
+### ada (URL parser)
+
+1. Download the amalgamated build (`singleheader.zip`) attached to the target
+   release at https://github.com/ada-url/ada/releases.
+2. Replace `third_party/ada/ada.h` and `third_party/ada/ada.cpp` with the new
+   files. The amalgamation also ships `ada_c.h`, which this repo does not use.
+3. Update the ada version in `docs/THIRD_PARTY_NOTICES.md`.
+4. Run `uv run make verify`, then the property harness (see above). ada parses
+   arbitrary untrusted input, so also confirm the Sanitizer CI run on the push
+   is green — it exercises the parser under ASan + UBSan.
+
+### ankerl unordered_dense
+
+1. Take `include/ankerl/unordered_dense.h` (and `stl.h`, if still present) from
+   the target release at https://github.com/martinus/unordered_dense/releases.
+2. Replace the files under `third_party/ankerl/`.
+3. Update the version in `docs/THIRD_PARTY_NOTICES.md`.
+4. Run `uv run make verify`.

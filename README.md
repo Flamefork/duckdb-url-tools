@@ -40,21 +40,31 @@ SELECT query_params_from_string('wp1=fb_smm|wp2=post+15%2F06', '|');
 
 ## Development
 
+Build and tooling commands run through [uv](https://docs.astral.sh/uv/): invoke every `make` target as `uv run make ...` so the pinned formatter and Python scripts are on PATH.
+
 ### Building from Source
 
-1.  **Build the extension:**
-    ```shell
-    make
-    ```
+```shell
+uv run make release
+```
 
-This will create the following binaries in the `./build/release` directory:
+This creates the following binaries in the `./build/release` directory:
 - `duckdb`: A shell with the extension pre-loaded.
 - `test/unittest`: The test runner.
 - `extension/url_tools/url_tools.duckdb_extension`: The distributable extension binary.
 
-### Running Tests
+### Testing
 
-To run the SQL tests:
 ```shell
-make test
+uv run make verify
 ```
+
+`verify` chains `release` → `test` → `format-check` in the right order and is the pre-PR gate. Note: `make test` alone only runs the already-built test binary — without a preceding `release` it exercises a stale build.
+
+The totality contract ("junk yields `NULL` or `{}`, never an error") is additionally fuzz-tested by a hypothesis property harness — see [test/README.md](test/README.md):
+
+```shell
+uv run --frozen test/property/url_tools_property.py
+```
+
+Benchmarks (regression gate and comparisons against netquack / stock SQL) live in [bench/](bench/README.md).
