@@ -43,7 +43,6 @@ using yyjson_mut_doc_ptr = std::unique_ptr<yyjson_mut_doc, YyjsonMutDocDeleter>;
 struct UrlToolsQueryParam {
 	std::string_view key;
 	std::string_view value;
-	uint64_t key_hash;
 };
 
 struct UrlToolsLocalState : public FunctionLocalState {
@@ -52,6 +51,7 @@ struct UrlToolsLocalState : public FunctionLocalState {
 
 	shared_ptr<JSONAllocator> json_allocator;
 	vector<UrlToolsQueryParam> query_params;
+	ankerl::unordered_dense::map<std::string_view, idx_t> query_param_index;
 	vector<std::pair<std::string, std::string>> decoded_pairs;
 	std::string url_buffer;
 };
@@ -128,15 +128,16 @@ static yyjson_mut_val *UrlToolsCopiedString(yyjson_mut_doc *doc, std::string_vie
 	return string_value;
 }
 
+// Repeated keys resolve last-wins while keeping first-occurrence order: the index
+// map is only ever written on insert (try_emplace, never operator[]), so a repeat
+// updates the value in place instead of moving the key to the back.
 static void UrlToolsPutQueryParam(UrlToolsLocalState &local_state, std::string_view key, std::string_view value) {
-	auto key_hash = ankerl::unordered_dense::hash<std::string_view> {}(key);
-	for (auto &query_param : local_state.query_params) {
-		if (query_param.key_hash == key_hash && query_param.key == key) {
-			query_param.value = value;
-			return;
-		}
+	auto [entry, inserted] = local_state.query_param_index.try_emplace(key, local_state.query_params.size());
+	if (inserted) {
+		local_state.query_params.push_back({key, value});
+	} else {
+		local_state.query_params[entry->second].value = value;
 	}
-	local_state.query_params.push_back({key, value, key_hash});
 }
 
 // Splits a query string on a custom pair separator, mirroring the WHATWG form
@@ -198,9 +199,10 @@ static yyjson_mut_val *UrlToolsBuildQueryParams(yyjson_mut_doc *doc, std::string
 				throw InternalException("url_tools: failed to add query parameter");
 			}
 		}
-		// The views above point into params/decoded_pairs, so local state must not
-		// retain them across rows.
+		// The views above (in query_params and in the index map's keys) point into
+		// params/decoded_pairs, so local state must not retain them across rows.
 		local_state.query_params.clear();
+		local_state.query_param_index.clear();
 		local_state.decoded_pairs.clear();
 	}
 	return query_params;

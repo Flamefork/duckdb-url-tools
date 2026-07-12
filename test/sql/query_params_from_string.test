@@ -55,3 +55,16 @@ statement error
 SELECT query_params_from_string('a=1', '');
 ----
 Invalid Input Error: query_params_from_string: separator must not be empty
+
+# Dedup is linear, not quadratic: a many-unique-key value parses fully.
+# 5000 keys k0..k4999, value "v": deterministic serialized length.
+query I
+SELECT length(query_params_from_string((SELECT string_agg('k' || i || '=v', '&') FROM range(5000) t(i))));
+----
+58891
+
+# Last-wins and first-occurrence order still hold at scale.
+query I
+SELECT query_params_from_string((SELECT string_agg('k' || (i % 3) || '=' || i, '&') FROM range(3000) t(i)));
+----
+{"k0":"2997","k1":"2998","k2":"2999"}
