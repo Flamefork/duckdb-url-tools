@@ -43,9 +43,12 @@ def main() -> int:
         latest_ms = latest[key]["min_ms"]
         delta_pct = (latest_ms - base_ms) / base_ms * 100 if base_ms else 0.0
         case_label = "/".join(str(part) for part in key)
-        # Only the url_tools rows gate: netquack/native drift is machine noise
-        # we display for context, not a regression in this repository's code.
-        gates = key[1] == "url_tools"
+        # Only single-threaded url_tools rows gate. netquack/native drift is machine noise, and
+        # multi-threaded timings swing 18-36% run to run for the same binary on a machine that is
+        # not idle (measured over five back-to-back runs) — the stock-SQL rows drift with them, so
+        # it is CPU contention, not this code. Gating on them makes the gate a coin flip; they stay
+        # visible for context.
+        gates = key[1] == "url_tools" and key[3] == 1
         regressed = delta_pct > args.tolerance_pct and (latest_ms - base_ms) > args.min_effect_ms
         marker = ""
         if regressed:
@@ -57,12 +60,12 @@ def main() -> int:
         print(f"{case_label:<48} {base_ms:>9.1f} {latest_ms:>9.1f} {delta_pct:>+7.1f}%{marker}")
 
     if regressions:
-        print(f"\n{len(regressions)} url_tools regression(s) beyond {args.tolerance_pct}%:")
+        print(f"\n{len(regressions)} single-threaded url_tools regression(s) beyond {args.tolerance_pct}%:")
         for case_label in regressions:
             print(f"  {case_label}")
         print("stored baselines drift with machine state: treat as a hint, confirm by re-running both builds")
         return 1
-    print(f"\nno url_tools regressions beyond {args.tolerance_pct}%")
+    print(f"\nno single-threaded url_tools regressions beyond {args.tolerance_pct}%")
     return 0
 
 

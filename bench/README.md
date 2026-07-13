@@ -38,12 +38,22 @@ uv run --frozen python bench/run_benchmarks.py
 uv run --frozen python bench/compare_results.py
 ```
 
-`compare_results.py` exits non-zero when a `url_tools` case is slower than the
-baseline beyond `--tolerance-pct` (default 10%) and `--min-effect-ms` (default
-1 ms). netquack/native rows are shown for context and never gate. Stored
-baselines drift with machine state — treat a flagged regression as a hint and
-confirm by re-running both builds in one session. To refresh the baseline after
-an intentional change, copy `latest.json` over `baseline.json` and commit it.
+`compare_results.py` exits non-zero when a **single-threaded** `url_tools` case
+is slower than the baseline beyond `--tolerance-pct` (default 10%) and
+`--min-effect-ms` (default 1 ms).
+
+Multi-threaded rows are shown but never gate: on a machine that is not idle they
+swing 18–36% run to run for the same binary (measured over five back-to-back
+runs), and the stock-SQL rows drift with them — that is CPU contention, not this
+extension's code. A gate that can be tripped by a background VM is a coin flip,
+so parallel scaling stays informational. netquack/native rows never gate either.
+
+Stored baselines drift with machine state — treat a flagged regression as a hint
+and confirm by re-running both builds in one session. To refresh the baseline
+after an intentional change, run the benchmarks **on an idle machine** (check
+`uptime` first: a load average anywhere near the core count invalidates the run),
+copy `latest.json` over `baseline.json`, and commit it saying why it was
+refreshed.
 
 ## Operation set
 
