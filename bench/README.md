@@ -67,7 +67,14 @@ missing cell means that stack has no comparable form.
 | `query_param` | `query_param(url, 'utm_source')` | `url_decode(regexp_extract(extract_query_string(url), ...))` | `regexp_extract(...)` |
 | `query_params_all` | `query_params(url, 'last')` | `map(...)` over the `extract_query_parameters` table function | `map_from_entries(...)` over `str_split` |
 | `components` | `url_components(url)` | — | — |
+| `utm_loose` | `query_params_loose(url, 'last')` | — | `map_concat(...)` over two `regexp_extract`/`str_split` passes |
 | `params_from_string` | `query_params_from_string(qs, '&', 'last')` | — | `map_from_entries(...)` over `str_split` |
+
+`utm_loose` is the operation the sole consumer hand-rolled before `query_params_loose`
+existed (rick/data's `utm_params_json` macro): find the fragment, shape its
+pseudo-query, take the query tail — the same string walked three times. The
+`native` spelling mirrors the loose *contract* (the `=` rule included) so both
+sides compute one answer; only the number of passes differs.
 
 Contract differences that stay in (the correctness gate pins agreement on
 curated rows where the contracts overlap exactly):
@@ -82,6 +89,10 @@ curated rows where the contracts overlap exactly):
 - The generated data has no duplicate query keys: the MAP-based emulations
   error on duplicates, and last-wins correctness is owned by the property
   harness, not the bench.
+- The `urls` corpus carries plain anchors (`#frag`), not single-page-app
+  fragments, so `utm_loose` times the merge on realistic query-carrying URLs
+  rather than on the fragment path. Whether the fragment is worth parsing is
+  decided by two `string_view` scans either way.
 
 Read results relative within one run (same machine state); cross-session
 absolute numbers are not comparable.

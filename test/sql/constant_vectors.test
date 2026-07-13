@@ -5,10 +5,11 @@
 require url_tools
 
 # The functions that write their result vector by hand (url_components, query_params,
-# query_params_from_string) own the constant-vector contract that Unary/BinaryExecutor carries for
-# the rest: when every argument is constant, the result must be a CONSTANT_VECTOR whose row 0 is the
-# answer for the whole chunk. Constant folding hides half of it — it always evaluates one row — so
-# the executor's own path is exercised here with the rewriter turned off, over a chunk of many rows.
+# query_params_from_string, query_params_loose) own the constant-vector contract that
+# Unary/BinaryExecutor carries for the rest: when every argument is constant, the result must be a
+# CONSTANT_VECTOR whose row 0 is the answer for the whole chunk. Constant folding hides half of it —
+# it always evaluates one row — so the executor's own path is exercised here with the rewriter turned
+# off, over a chunk of many rows.
 statement ok
 SET disabled_optimizers='expression_rewriter';
 
@@ -22,6 +23,11 @@ query I
 SELECT DISTINCT query_params_from_string('a=1|a=2|b=3', '|', 'all') FROM range(3000);
 ----
 {a=[1, 2], b=[3]}
+
+query I
+SELECT DISTINCT query_params_loose('https://x/?a=1#/p?a=2&b=3', 'all') FROM range(3000);
+----
+{a=[1], b=[3]}
 
 query I
 SELECT DISTINCT url_components('https://sub.x.co:8443/p?a=1&a=2#f', 'all') FROM range(3000);
@@ -46,10 +52,11 @@ RESET disabled_optimizers;
 
 # The folded spelling of the same calls: here the executor evaluates one row and demands the
 # constant vector back. Both halves of the contract, one file.
-query IIII
+query IIIII
 SELECT query_params('https://x/?a=1&a=2&b=3', 'last'),
        query_params_from_string('a=1|a=2|b=3', '|', 'all'),
+       query_params_loose('https://x/?a=1#/p?a=2&b=3', 'all'),
        (url_components('https://sub.x.co:8443/p?a=1&a=2#f', 'all')).query_params,
        url_components(NULL) IS NULL;
 ----
-{a=2, b=3}	{a=[1, 2], b=[3]}	{a=[1, 2]}	true
+{a=2, b=3}	{a=[1, 2], b=[3]}	{a=[1], b=[3]}	{a=[1, 2]}	true

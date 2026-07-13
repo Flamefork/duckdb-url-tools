@@ -29,6 +29,30 @@ TARGETS = {
     "native": {"extensions": [], "load_url_tools": False},
 }
 
+# The loose extraction hand-rolled without the function, the way the sole consumer's `utm_params_json`
+# macro had to write it: find the fragment, shape its pseudo-query, then take the query tail — the
+# same string walked three times, where query_params_loose walks it once. Spelled in stock SQL (the
+# `native` target loads nothing), and written to mirror the loose CONTRACT, the '=' rule included, so
+# the two sides compute one answer and the comparison stays a comparison.
+LOOSE_FRAGMENT = "regexp_extract(url, '#(.*)$', 1)"
+LOOSE_FRAGMENT_QUERY = (
+    f"CASE WHEN strpos({LOOSE_FRAGMENT}, '?') > 0 THEN regexp_extract({LOOSE_FRAGMENT}, '[^?]*$') "
+    f"WHEN strpos({LOOSE_FRAGMENT}, '=') > 0 THEN {LOOSE_FRAGMENT} ELSE '' END"
+)
+LOOSE_QUERY = (
+    "CASE WHEN strpos(url, '?') > 0 THEN regexp_extract(url, '\\?([^#]*)', 1) "
+    "WHEN strpos(url, '=') > 0 AND NOT regexp_matches(url, '^([a-zA-Z][a-zA-Z0-9+.-]*:|/)') THEN url "
+    "ELSE '' END"
+)
+
+
+def loose_entries(source: str) -> str:
+    return (
+        "map_from_entries([(split_part(p, '=', 1), split_part(p, '=', 2)) "
+        f"for p in str_split({source}, '&') if p <> ''])"
+    )
+
+
 # One entry per operation; `targets` maps target label to the timed expression
 # over the `_bench_in` temp table (column named by `column`). Only targets with a
 # comparable practical form are present — the absence of a target IS the
@@ -85,6 +109,14 @@ OPERATIONS = {
         "column": "url",
         "targets": {
             "url_tools": "url_components(url)",
+        },
+    },
+    "utm_loose": {
+        "input": "urls",
+        "column": "url",
+        "targets": {
+            "url_tools": "query_params_loose(url, 'last')",
+            "native": f"map_concat({loose_entries(LOOSE_FRAGMENT_QUERY)}, {loose_entries(LOOSE_QUERY)})",
         },
     },
     "params_from_string": {

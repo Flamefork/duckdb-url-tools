@@ -402,6 +402,41 @@ def test_accessors_agree_with_components(url: str) -> None:
         assert point == component, f"{accessor} is {point!r}, the struct field {field} is {component!r}"
 
 
+# The loose variant is total on anything at all — it is the one function whose input is not even
+# expected to be a URL — and it always yields a map, never NULL for a non-NULL input.
+@PROPERTY_SETTINGS
+@example(url="https://s.ru/#/cart?utm_source=push", mode="last")
+@example(url="Заголовок страницы?utm_source=qr", mode="all")
+@example(url="utm_source=x&utm_medium=y", mode="first")
+@example(url="just some text", mode="all")
+@given(url=url_inputs, mode=st.sampled_from(PARSED_QUERY_VALUES_MODES))
+def test_query_params_loose_total(url: str, mode: str) -> None:
+    result = read_params(f"query_params_loose({sql_literal(url)}, '{mode}')")
+    assert isinstance(result, dict), f"query_params_loose yielded {result!r}"
+
+
+# Loose conservativity (law 6): query_params_loose only ever ADDS the parameters a fragment shaped
+# like a query carries. Where there is no such fragment — no fragment at all, a plain anchor — it is
+# query_params exactly, so a consumer can swap one for the other without auditing its URLs. A NULL
+# fragment is an unparseable input, which is where the two are allowed to differ (loose falls back on
+# the string's own shape).
+@PROPERTY_SETTINGS
+@example(url="https://example.com/?a=1&a=2#top")
+@example(url="https://example.com/?a=1&a=2")
+@example(url="/search?q=%D0%BB&tab=products#anchor")
+@given(url=url_inputs)
+def test_loose_is_conservative(url: str) -> None:
+    literal = sql_literal(url)
+    fragment = SESSION.read(f"url_fragment({literal})")
+    assert not isinstance(fragment, UrlToolsSession.Errored), f"url_fragment errored: {fragment.message}"
+    if fragment is None or "?" in fragment or "=" in fragment:
+        return
+    for mode in PARSED_QUERY_VALUES_MODES:
+        loose = read_params(f"query_params_loose({literal}, '{mode}')")
+        strict = read_params(f"query_params({literal}, '{mode}')")
+        assert loose == strict, f"loose is {loose!r}, query_params({mode!r}) is {strict!r}"
+
+
 # The bare-query-string variant is total and always yields a map, even on junk that never came near
 # a URL (raw percent noise, invalid UTF-8 escapes, NULs). Its default mode is 'all', so every value
 # is a list — a single-valued key included.
@@ -461,6 +496,8 @@ PROPERTIES = [
     test_last_map_matches_v1_json,
     test_raw_query_reparses_to_the_same_params,
     test_accessors_agree_with_components,
+    test_query_params_loose_total,
+    test_loose_is_conservative,
     test_query_params_from_string_total,
     test_query_params_from_string_separator_total,
     test_empty_separator_fails_loud,

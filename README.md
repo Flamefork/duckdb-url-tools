@@ -21,6 +21,12 @@ Built on [ada](https://github.com/ada-url/ada), the WHATWG-compliant URL parser 
   - `'all'` (default) — `MAP(VARCHAR, VARCHAR[])`, every value of every key in occurrence order (a single-valued key is a one-element list).
   - `'first'` / `'last'` — `MAP(VARCHAR, VARCHAR)`, the first / last value of every key.
 - **`query_params_from_string(text[, sep[, query_values]])`**: Parses a bare query string (`utm_source=x&utm_medium=y`, no URL around it) into the same `MAP`. A leading `?` is tolerated. The optional pair separator `sep` (default `&`) covers formats like `key=v1|key2=v2`.
+- **`query_params_loose(text[, query_values])`**: Extracts parameters from a string that *carries* them without having to be a well-formed URL — a single-page-app fragment (`https://shop.ru/#/cart?utm_source=push`), a page title with a query tail (`Заголовок?utm_source=qr`), a bare query string (`utm_source=x&utm_medium=y`). Same `MAP` and the same `query_values` axis as `query_params`. The rules, in order:
+  - the input parses as a URL → the fragment supplies the base parameters, and the query overrides them: a key the query carries takes only the query's values, and keys the query alone carries come last. What the fragment contributes is decided by the text before its first `?`: a `=` there means the fragment already *is* a query string, so the whole of it is parsed and a `?` inside a value is not a separator (`#access_token=t&next=/page?x=1` → `{access_token: t, next: '/page?x=1'}`); otherwise the fragment's **first** `?` opens the parameters and everything after it is the query (`#/cart?utm_source=push&next=/a?b=1` → `{utm_source: push, next: '/a?b=1'}` — a query starts at the first `?`, and a later one is a character inside a value); otherwise the fragment contributes nothing;
+  - it does not parse → everything after its first `?` is the query string, or the whole input is one when it has no `?` but does have a `=`;
+  - neither → an empty map. The `=` requirement is what keeps plain anchors (`#top`) and prose out of the result.
+
+  The pair separator is `&`. On a URL whose fragment carries neither `?` nor `=`, `query_params_loose` is exactly `query_params`.
 - **`query_param(text, key[, query_values])`**: The decoded value of one key, `VARCHAR`, without building a map. `query_values` is `'last'` (default) or `'first'`; `'all'` has no scalar result — use `query_params(url, 'all')`. An absent key yields `NULL`, a key present with an empty value yields `''`.
 - **`url_scheme(text)`**, **`url_host(text)`**, **`url_path(text)`**, **`url_query(text)`**, **`url_fragment(text)`** → `VARCHAR`, and **`url_port(text)`** → `USMALLINT`: one component of a URL, without building the struct or touching the query parameters — reach for these when you want a single field. Each is exactly the same-named field of `url_components(url)`, NULLs included: `url_scheme` / `url_host` / `url_port` are `NULL` for a relative path, `url_query` / `url_fragment` are `''` on a parseable URL that carries none, and every accessor is `NULL` for unparseable input.
 
@@ -61,6 +67,18 @@ SELECT url_host('https://example.com:8443/path?a=1#top'), url_port('https://exam
 
 SELECT url_path('/search?q=1'), url_scheme('/search?q=1'), url_query('https://example.com/p');
 -- /search, NULL, ''
+
+SELECT query_params_loose('https://shop.ru/#/cart?utm_source=push', 'last');
+-- {utm_source=push}
+
+SELECT query_params_loose('https://shop.ru/?utm_source=url#/cart?utm_source=frag&promo=x', 'last');
+-- {utm_source=url, promo=x}   -- the query overrides the fragment
+
+SELECT query_params_loose('https://shop.ru/cb#access_token=t&next=/page?x=1', 'last');
+-- {access_token=t, next='/page?x=1'}   -- the fragment IS the query string
+
+SELECT query_params_loose('Заголовок страницы?utm_source=qr', 'last'), query_params_loose('https://shop.ru/p#top');
+-- {utm_source=qr}, {}
 
 SELECT query_params_from_string('utm_source=yandex&plus=a+b', query_values := 'last');
 -- {utm_source=yandex, plus=a b}

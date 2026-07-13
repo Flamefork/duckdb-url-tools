@@ -89,12 +89,14 @@ EXECUTE misnamed_axis('https://x/?a=1', 'all');
 Binder Error: url_components: Unknown argument 'typo'
 
 # The param functions carry the same axis, named the same way.
-query II
+query III
 SELECT query_params('https://x/?a=1&a=2', query_values := 'last') = query_params('https://x/?a=1&a=2', 'last'),
        query_param('https://x/?a=1&a=2', 'a', query_values := 'first')
-     = query_param('https://x/?a=1&a=2', 'a', 'first');
+     = query_param('https://x/?a=1&a=2', 'a', 'first'),
+       query_params_loose('https://x/?a=1#b=2', query_values := 'last')
+     = query_params_loose('https://x/?a=1#b=2', 'last');
 ----
-true	true
+true	true	true
 
 # Two same-typed optionals: the alias is the only thing that can tell them apart. Naming both, in
 # order, is the unambiguous spelling.
@@ -146,6 +148,11 @@ statement error
 SELECT query_param('https://x/?a=1', 'a', typo := 'first');
 ----
 Binder Error: query_param: Unknown argument 'typo'
+
+statement error
+SELECT query_params_loose('https://x/?a=1', typo := 'all');
+----
+Binder Error: query_params_loose: Unknown argument 'typo'
 
 # Which argument is the separator is bind data an alias-free re-bind cannot recover, so it travels
 # with the plan: a prepared statement (bound once, executed later) must not re-read the axis

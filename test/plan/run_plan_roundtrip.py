@@ -42,6 +42,7 @@ CASES = [
     ("url_components named axis", "SELECT url_components(u, query_values := 'all') AS c FROM t;"),
     ("url_components default", "SELECT url_components(u) AS c FROM t;"),
     ("query_params named axis", "SELECT query_params(u, query_values := 'last') AS m FROM t;"),
+    ("query_params_loose named axis", "SELECT query_params_loose(u, query_values := 'last') AS m FROM t;"),
     ("query_param named axis", "SELECT query_param(u, 'a', query_values := 'first') AS v FROM t;"),
 ]
 

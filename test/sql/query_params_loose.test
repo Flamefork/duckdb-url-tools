@@ -1,0 +1,190 @@
+# name: test/sql/query_params_loose.test
+# description: query_params_loose extracts parameters from strings that carry them without being URLs
+# group: [sql]
+
+require url_tools
+
+require json
+
+# A single-page app hangs its parameters off the fragment's route, so the tail after its FIRST '?' is
+# a query. First, not last: a query starts where the first '?' is, and a later '?' sits inside a value
+# ('next=/a?b=1'), exactly as it does in a real URL. Taking the LAST one would answer {b=1} for the
+# second URL and silently drop utm_source.
+query II
+SELECT query_params_loose('https://s.ru/#/cart?utm_source=push', 'last'),
+       query_params_loose('https://s.ru/#/cart?utm_source=push&next=/a?b=1', 'last');
+----
+{utm_source=push}	{utm_source=push, next='/a?b=1'}
+
+# Past that first '?' the tail is a query string like any other, so a further '?' is not a separator
+# but a character in the key — the pair separator is '&' only. An empty route in front of the '?' has
+# no '=' either, so it takes the same branch.
+query III
+SELECT query_params_loose('https://s.ru/#/a?b?c=1', 'last'),
+       query_params_loose('https://s.ru/#/a?b?utm_source=push', 'last'),
+       query_params_loose('https://s.ru/#?a=1', 'last');
+----
+{b?c=1}	{b?utm_source=push}	{a=1}
+
+# Which reading a fragment gets is decided by the text in FRONT of its first '?': a '=' there means
+# the fragment already IS a query string, so the WHOLE of it is parsed and a '?' inside a value is
+# just a character. The OAuth implicit flow is exactly this shape — read as a route with a query tail
+# it would answer {x=1} and silently drop the token.
+query II
+SELECT query_params_loose('https://x/p#access_token=t&next=/page?x=1', 'last'),
+       query_params_loose('https://x/p#access_token=t&next=/page?x=1', 'all');
+----
+{access_token=t, next='/page?x=1'}	{access_token=[t], next=['/page?x=1']}
+
+# The query still overrides such a fragment key by key — deciding what the fragment IS does not make
+# it a peer of the query.
+query I
+SELECT query_params_loose('https://x/p?next=q#access_token=t&next=/page?x=1', 'last');
+----
+{access_token=t, next=q}
+
+# The two sources are not peers: the fragment's pseudo-query is the base, the real query overrides
+# it. A colliding key keeps its base position (key order is base-first) and takes ONLY the query's
+# values — 'all' shows it: the fragment's a=2&a=3 are dropped, not appended to.
+query II
+SELECT query_params_loose('https://s.ru/?a=1#/p?a=2&b=3', 'last'),
+       query_params_loose('https://s.ru/?a=1&a=9#/p?a=2&a=3&b=4', 'all');
+----
+{a=1, b=3}	{a=[1, 9], b=[4]}
+
+# A key the query does NOT carry keeps the fragment's values, and a key only the query carries lands
+# after the fragment's keys.
+query II
+SELECT query_params_loose('https://s.ru/?q=1#a=2&b=3', 'last'),
+       query_params_loose('https://s.ru/?q=1#a=2&a=3', 'all');
+----
+{a=2, b=3, q=1}	{a=[2, 3], q=[1]}
+
+# The '=' requirement is what keeps a plain anchor out: '#top' is a place on the page, not a
+# parameter. A fragment shaped like a query ('#access_token=...', the OAuth implicit flow) is one.
+query II
+SELECT query_params_loose('https://s.ru/p#top', 'last'),
+       query_params_loose('https://s.ru/p#access_token=t&state=s', 'last');
+----
+{}	{access_token=t, state=s}
+
+# A string that is not a URL at all: its parameters start at its FIRST '?' (a page title in front of
+# a query tail), or the whole string is one query when it has no '?' but does have a '='.
+query III
+SELECT query_params_loose('Заголовок страницы?utm_source=qr', 'last'),
+       query_params_loose('utm_source=x&utm_medium=y', 'last'),
+       query_params_loose('just some text', 'last');
+----
+{utm_source=qr}	{utm_source=x, utm_medium=y}	{}
+
+# The order of the rules matters: a parseable input is read as a URL even when it also has a '=' in
+# it. 'mailto:x=1' parses (opaque path, no query, no fragment), so it carries no parameters — the
+# non-URL fallback never sees it. A protocol-relative input does NOT parse, so it does.
+query II
+SELECT query_params_loose('mailto:x=1', 'last'),
+       query_params_loose('//x.com/p?a=1', 'last');
+----
+{}	{a=1}
+
+# Law 6 (conservativity): on a parseable URL whose fragment carries neither '?' nor '=', loose IS
+# query_params — no fragment, a plain anchor, and a relative path alike.
+query I
+SELECT count(*) FILTER (WHERE query_params_loose(u, 'all') IS DISTINCT FROM query_params(u, 'all'))
+FROM (VALUES
+    ('https://s.ru/?a=1'),
+    ('https://s.ru/?a=1&b=2&a=3#top'),
+    ('https://s.ru/path'),
+    ('/rel?c=d#anchor'),
+    ('myapp://open?screen=cart'),
+    (NULL)
+) t(u);
+----
+0
+
+# The values axis is the same one every map function carries, and it selects the result type.
+query IIII
+SELECT query_params_loose('https://s.ru/?a=1&a=2#b=3'),
+       query_params_loose('https://s.ru/?a=1&a=2#b=3', 'first'),
+       typeof(query_params_loose('https://s.ru/')),
+       typeof(query_params_loose('https://s.ru/', 'last'));
+----
+{b=[3], a=[1, 2]}	{b=3, a=1}	MAP(VARCHAR, VARCHAR[])	MAP(VARCHAR, VARCHAR)
+
+# Key-set invariance across modes, and one entry per key however many times it repeats on either side.
+query III
+SELECT map_keys(query_params_loose('https://s.ru/?a=1&a=2#a=0&b=3', 'first')),
+       map_keys(query_params_loose('https://s.ru/?a=1&a=2#a=0&b=3', 'all')),
+       cardinality(query_params_loose('https://s.ru/?a=1&a=2#a=0&b=3', 'all'));
+----
+[a, b]	[a, b]	2
+
+# Decoding is unchanged: WHATWG form semantics on both sides of the merge ('+' as space,
+# percent-escapes), and the pair separator is '&' only.
+query II
+SELECT query_params_loose('https://s.ru/?q=%D0%BB&plus=a+b', 'last'),
+       query_params_loose('https://s.ru/#/p?q=a+b&e=%20x', 'last');
+----
+{q=л, plus=a b}	{q=a b, e=' x'}
+
+# Empty input is an empty map (there is no URL, but there are no parameters either); NULL input is
+# the one NULL map. Junk never raises.
+query IIIII
+SELECT query_params_loose(''),
+       query_params_loose('not a url at all'),
+       cardinality(query_params_loose('junk')),
+       query_params_loose('') IS NULL,
+       query_params_loose(NULL) IS NULL;
+----
+{}	{}	0	false	true
+
+# The '=' rule guards the NO-'?' case only: past a '?' this is WHATWG form parsing, and a segment
+# without '=' is a key with an empty value — exactly as '?flag' is in a real query. Junk carrying a
+# '?' therefore yields a junk key, which is the parse being total, not a special case for junk.
+query II
+SELECT query_params_loose('???', 'last'),
+       query_params_loose('page?', 'last');
+----
+{?=''}	{}
+
+# The axis is bind-time — it selects the result type — so its errors are the same errors.
+statement error
+SELECT query_params_loose('https://s.ru/', 'raw');
+----
+Binder Error: query_params_loose: unknown query_values 'raw', expected one of 'all', 'first', 'last'
+
+statement error
+SELECT query_params_loose('https://s.ru/', NULL);
+----
+Binder Error: query_params_loose: query_values must not be NULL, expected one of 'all', 'first', 'last'
+
+statement error
+SELECT query_params_loose(u, m) FROM (VALUES ('https://x/', 'last')) t(u, m);
+----
+Binder Error: query_params_loose: query_values must be a constant, one of 'all', 'first', 'last'
+
+# Bulk scan across chunk boundaries, mixing every input class: the maps stay well-formed (one entry
+# per key) and no junk row kills the scan.
+statement ok
+CREATE TABLE loose_mixed AS SELECT CASE i % 6
+    WHEN 0 THEN 'junk ' || i
+    WHEN 1 THEN NULL
+    WHEN 2 THEN 'https://e.com/p?a=' || i || '&a=' || i || '#/cart?a=0&b=x'
+    WHEN 3 THEN 'Title ' || i || '?utm_source=qr'
+    WHEN 4 THEN 'https://e.com/p#top'
+    ELSE 'utm_source=' || i END AS u
+FROM range(10000) t(i);
+
+query IIII
+SELECT count(m) AS non_null_maps,
+       sum(cardinality(m)) AS entries,
+       count(*) FILTER (WHERE len(map_keys(m)) <> len(list_distinct(map_keys(m)))) AS duplicate_key_rows,
+       sum(len(m['a'])) FILTER (WHERE u LIKE 'https://e.com/p?%') AS query_values_only
+FROM (SELECT u, query_params_loose(u, 'all') AS m FROM loose_mixed);
+----
+8333	6667	0	3334
+
+# The connection is still usable after junk input (no invalidation).
+query I
+SELECT 1;
+----
+1
