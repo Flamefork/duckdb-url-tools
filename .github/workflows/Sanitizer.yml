@@ -86,3 +86,11 @@ jobs:
           URL_TOOLS_DUCKDB_BIN: build/debug/duckdb
           URL_TOOLS_EXTENSION: build/debug/extension/url_tools/url_tools.duckdb_extension
         run: uv run --frozen test/wpt/run_wpt_corpus.py
+
+      # Every optional argument is resolved by its alias, and a deserialized plan re-runs the bind
+      # on children no caller wrote. No SQL statement serializes a bound plan, so SQLLogic cannot
+      # reach that re-bind at all — duckdb's own plan_serializer is what does.
+      - name: Bound-plan round-trip
+        env:
+          URL_TOOLS_PLAN_SERIALIZER: build/debug/tools/plan_serializer
+        run: uv run --frozen test/plan/run_plan_roundtrip.py

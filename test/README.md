@@ -34,6 +34,38 @@ uv run --frozen test/property/url_tools_property.py
 harness runs under sanitizers in CI (`.github/workflows/Sanitizer.yml`): a
 small budget on every push/PR, a deep sweep weekly.
 
+## Bound-plan round-trip (non-SQLLogic)
+
+```bash
+uv run --frozen test/plan/run_plan_roundtrip.py
+```
+
+Every optional argument in this surface is resolved by its **alias**
+(`query_params_from_string(qs, query_values := 'last')` is not
+`query_params_from_string(qs, 'last')` — the first names the axis, the second
+gives a separator). Serializing a **bound** plan is the one thing that re-binds a
+function from arguments no caller wrote: DuckDB's deserializer re-runs the bind
+callback on the deserialized children. If a re-bind could not see aliases, that
+call would come back as a separator of `'last'` — a silently wrong answer with no
+error anywhere.
+
+Aliases *do* survive (`Expression::Serialize` carries one per child), which is why
+the bind data needs no `Serialize`/`Deserialize` callbacks of its own. This harness
+is what holds that assumption up: if DuckDB ever stops carrying them, these cases
+fail instead of the extension quietly misreading its own arguments.
+
+No SQL statement serializes a bound plan — `PRAGMA enable_verification` round-trips
+the *parsed* statement and `PREPARE` keeps the bound plan in memory — so SQLLogic
+cannot reach this path at all. `duckdb/tools/plan_serializer` can, and the harness
+drives it: it plans the last statement, writes the bound plan out, reads it back,
+executes the deserialized plan and compares it against executing the statement
+directly. `URL_TOOLS_PLAN_SERIALIZER` overrides the tool path (defaults to the
+release build).
+
+Cases use a **column** input where they can: a constant one folds away in any
+pipeline that optimizes before it serializes, taking the function expression out of
+the plan with it.
+
 ## WPT URL corpus (non-SQLLogic)
 
 `test/wpt/urltestdata.json` is the WHATWG conformance corpus from

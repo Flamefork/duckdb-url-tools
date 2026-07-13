@@ -3,8 +3,6 @@
 #include "url_tools_extension.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/serializer/deserializer.hpp"
-#include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/types/vector.hpp"
@@ -469,10 +467,11 @@ static unique_ptr<FunctionData> QueryParamsBind(ClientContext &context, ScalarFu
 	return make_uniq<QueryValuesBindData>(mode);
 }
 
-// Which argument carries the separator is decided by the aliases, and aliases are the one thing a
-// re-bind may not see: query_params_from_string(qs, values := 'all') and
-// query_params_from_string(qs, '|') are the same two constants once the names are gone. So the
-// resolution travels with the plan instead of being guessed again from it.
+// Which argument carries the separator is decided by the aliases, so the resolution is bind data:
+// query_params_from_string(qs, query_values := 'all') and query_params_from_string(qs, '|') are the
+// same two constants once the names are gone. The names are not gone, though — a bound plan
+// serializes each child's alias with it, so a re-bind sees them again and re-derives this from the
+// arguments (test/plan pins it). No Serialize/Deserialize callbacks needed.
 struct QueryParamsFromStringBindData : public FunctionData {
 	QueryParamsFromStringBindData(QueryValuesMode mode, idx_t separator_index)
 	    : mode(mode), separator_index(separator_index) {
@@ -496,19 +495,6 @@ static unique_ptr<FunctionData> QueryParamsFromStringBind(ClientContext &context
 	auto mode = BindOptionalMode(context, arguments, filled_by[1], QUERY_PARAMS_FROM_STRING_AXIS, QueryValuesMode::ALL);
 	bound_function.SetReturnType(QueryParamsMapType(mode));
 	return make_uniq<QueryParamsFromStringBindData>(mode, filled_by[0]);
-}
-
-static void QueryParamsFromStringSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data,
-                                           const ScalarFunction &) {
-	auto &data = bind_data->Cast<QueryParamsFromStringBindData>();
-	serializer.WriteProperty<uint8_t>(100, "mode", static_cast<uint8_t>(data.mode));
-	serializer.WriteProperty<idx_t>(101, "separator_index", data.separator_index);
-}
-
-static unique_ptr<FunctionData> QueryParamsFromStringDeserialize(Deserializer &deserializer, ScalarFunction &) {
-	auto mode = static_cast<QueryValuesMode>(deserializer.ReadProperty<uint8_t>(100, "mode"));
-	auto separator_index = deserializer.ReadProperty<idx_t>(101, "separator_index");
-	return make_uniq<QueryParamsFromStringBindData>(mode, separator_index);
 }
 
 static unique_ptr<FunctionData> QueryParamBind(ClientContext &context, ScalarFunction &,
@@ -802,21 +788,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    bind_typed_function({LogicalType::VARCHAR, LogicalType::VARCHAR}, QueryParamsScalarFun, QueryParamsBind));
 	loader.RegisterFunction(query_params_set);
 
-	// Two same-typed optionals: which argument is the separator is bind data, and bind data that a
-	// re-bind cannot re-derive has to be serialized with the plan.
-	auto query_params_from_string_function = [&](vector<LogicalType> arguments) {
-		auto function =
-		    bind_typed_function(std::move(arguments), QueryParamsFromStringScalarFun, QueryParamsFromStringBind);
-		function.SetSerializeCallback(QueryParamsFromStringSerialize);
-		function.SetDeserializeCallback(QueryParamsFromStringDeserialize);
-		return function;
-	};
 	ScalarFunctionSet query_params_from_string_set("query_params_from_string");
-	query_params_from_string_set.AddFunction(query_params_from_string_function({LogicalType::VARCHAR}));
 	query_params_from_string_set.AddFunction(
-	    query_params_from_string_function({LogicalType::VARCHAR, LogicalType::VARCHAR}));
+	    bind_typed_function({LogicalType::VARCHAR}, QueryParamsFromStringScalarFun, QueryParamsFromStringBind));
+	query_params_from_string_set.AddFunction(bind_typed_function(
+	    {LogicalType::VARCHAR, LogicalType::VARCHAR}, QueryParamsFromStringScalarFun, QueryParamsFromStringBind));
 	query_params_from_string_set.AddFunction(
-	    query_params_from_string_function({LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
+	    bind_typed_function({LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                        QueryParamsFromStringScalarFun, QueryParamsFromStringBind));
 	loader.RegisterFunction(query_params_from_string_set);
 
 	// The scalar result type never varies, but the axis still has to be resolved at bind time: 'all'
