@@ -73,7 +73,9 @@ missing cell means that stack has no comparable form.
 `utm_loose` is the operation the sole consumer hand-rolled before `query_params_loose`
 existed (rick/data's `utm_params_json` macro): find the fragment, shape its
 pseudo-query, take the query tail — the same string walked three times. The
-`native` spelling mirrors the loose *contract* (the `=` rule included) so both
+`native` spelling mirrors the loose *contract* — the fragment rule (a `=` before
+the fragment's first `?` means the fragment *is* a query string, otherwise the
+tail after that first `?`) and the key ending at the first `=` included — so both
 sides compute one answer; only the number of passes differs.
 
 Contract differences that stay in (the correctness gate pins agreement on
@@ -89,10 +91,17 @@ curated rows where the contracts overlap exactly):
 - The generated data has no duplicate query keys: the MAP-based emulations
   error on duplicates, and last-wins correctness is owned by the property
   harness, not the bench.
-- The `urls` corpus carries plain anchors (`#frag`), not single-page-app
+- The **timed** `urls` corpus carries plain anchors (`#frag`), not single-page-app
   fragments, so `utm_loose` times the merge on realistic query-carrying URLs
   rather than on the fragment path. Whether the fragment is worth parsing is
-  decided by two `string_view` scans either way.
+  decided by two `string_view` scans either way. The **gate** rows do carry the
+  fragment shapes (SPA route, OAuth-style fragment, a fragment key the query
+  overrides): timing them is pointless, but agreeing on them is not — that branch
+  is the reason `query_params_loose` exists.
+- Every gate URL carries `utm_source` in its **query**: the regex emulations
+  cannot tell a query from a fragment, so a URL carrying it only in the fragment
+  would make `query_param` disagree about the NULL-vs-`''` difference above
+  rather than about the operation.
 
 Read results relative within one run (same machine state); cross-session
 absolute numbers are not comparable.

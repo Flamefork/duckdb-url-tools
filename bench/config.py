@@ -36,8 +36,9 @@ TARGETS = {
 # the two sides compute one answer and the comparison stays a comparison.
 LOOSE_FRAGMENT = "regexp_extract(url, '#(.*)$', 1)"
 LOOSE_FRAGMENT_QUERY = (
-    f"CASE WHEN strpos({LOOSE_FRAGMENT}, '?') > 0 THEN regexp_extract({LOOSE_FRAGMENT}, '[^?]*$') "
-    f"WHEN strpos({LOOSE_FRAGMENT}, '=') > 0 THEN {LOOSE_FRAGMENT} ELSE '' END"
+    f"CASE WHEN strpos(split_part({LOOSE_FRAGMENT}, '?', 1), '=') > 0 THEN {LOOSE_FRAGMENT} "
+    f"WHEN strpos({LOOSE_FRAGMENT}, '?') > 0 THEN regexp_extract({LOOSE_FRAGMENT}, '\\?(.*)$', 1) "
+    f"ELSE '' END"
 )
 LOOSE_QUERY = (
     "CASE WHEN strpos(url, '?') > 0 THEN regexp_extract(url, '\\?([^#]*)', 1) "
@@ -47,8 +48,12 @@ LOOSE_QUERY = (
 
 
 def loose_entries(source: str) -> str:
+    # The key ends at the FIRST '=' and everything after it is the value, further '=' included: the
+    # OAuth fragment's `next=/page?x=1` is one pair, and `split_part(p, '=', 2)` would hand back a
+    # value cut at the second '='. A pair without '=' is a key with an empty value, as in a real query.
     return (
-        "map_from_entries([(split_part(p, '=', 1), split_part(p, '=', 2)) "
+        "map_from_entries([(split_part(p, '=', 1), "
+        "CASE WHEN strpos(p, '=') > 0 THEN substr(p, strpos(p, '=') + 1) ELSE '' END) "
         f"for p in str_split({source}, '&') if p <> ''])"
     )
 
@@ -143,12 +148,27 @@ OPERATIONS = {
 }
 
 # Curated rows where every target's contract overlaps exactly (absolute http(s),
-# non-empty path, utm_source present, no percent-encoding, no duplicate keys):
-# the correctness gate asserts all targets agree here before anything is timed.
+# non-empty path, utm_source present in the QUERY, no percent-encoding, no
+# duplicate keys): the correctness gate asserts all targets agree here before
+# anything is timed. utm_source has to sit in the query because the regex
+# emulations cannot tell a query from a fragment — a URL carrying it only in the
+# fragment would make them disagree about a contract difference already
+# documented (NULL vs ''), not about the operation.
+#
+# The last three rows are the branch utm_loose exists for, one row per fragment
+# rule: a single-page-app route with a query tail, a fragment that IS a query
+# string (the OAuth implicit flow — a '?' inside a value is not a separator), and
+# a fragment key the query overrides whose parameters start at the fragment's
+# FIRST '?', so the '?' inside `next=/a?b=1` is a character and not a separator
+# either. Row 2's '#frag' is the fourth rule, the plain anchor that contributes
+# nothing.
 GATE_URLS = [
     "https://example.com/path/to?utm_source=news&q=duck",
     "https://sub.shop.co.uk:8443/catalog/item?utm_source=email&id=42#frag",
     "http://example.org/a/b/c?utm_source=cpc&ref=x",
+    "https://shop.example.com/app?utm_source=email&id=7#/cart?promo=x",
+    "https://app.example.com/callback?utm_source=email#access_token=t&next=/page?x=1",
+    "https://example.com/p?utm_source=news#/cart?utm_source=push&next=/a?b=1",
 ]
 GATE_QUERY_STRINGS = [
     "utm_source=news&q=duck",
