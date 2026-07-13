@@ -1,0 +1,129 @@
+# name: test/sql/utf8_sanitize.test
+# description: percent-decoded bytes that are not valid UTF-8 are replaced with U+FFFD, per byte
+# group: [sql]
+
+require url_tools
+
+# Percent-decoding a query param can yield any byte sequence, so the JSON output would not be
+# valid UTF-8 unless the ill-formed bytes are replaced. This file pins that replacement at the
+# byte level (hex of the serialized JSON) rather than by example: it is a characterization table,
+# and every expected value here was recorded from the shipped behavior. Both the value side and
+# the key side go through the same sanitizer, so both are pinned.
+
+# Every byte 0x80..0xFF standing alone is ill-formed and collapses to exactly one U+FFFD
+# (EF BF BD). A single result row means all 128 bytes agree; a future divergence splits the group.
+query IIII
+SELECT hex(query_params_from_string('a=%' || printf('%02X', b))::VARCHAR), count(*), min(b), max(b)
+FROM range(128, 256) t(b)
+GROUP BY 1
+ORDER BY 1;
+----
+7B2261223A22EFBFBD227D	128	128	255
+
+# The classic failure set, with the whole malformed sequence spelled out. The replacement is
+# per-byte and deliberately NOT WHATWG maximal-subpart: a rejected 3-byte sequence yields three
+# U+FFFD, not one. Valid multi-byte sequences — including ones sitting next to invalid bytes —
+# must survive untouched.
+query III
+WITH cases(id, label, encoded) AS (VALUES
+    (1, 'valid 2-byte U+0080', '%C2%80'),
+    (2, 'valid 2-byte U+00E9', '%C3%A9'),
+    (3, 'valid 3-byte U+0800', '%E0%A0%80'),
+    (4, 'valid 3-byte U+20AC', '%E2%82%AC'),
+    (5, 'valid 3-byte U+FFFD', '%EF%BF%BD'),
+    (6, 'valid 4-byte U+10000', '%F0%90%80%80'),
+    (7, 'valid 4-byte U+10FFFF', '%F4%8F%BF%BF'),
+    (8, 'truncated 2-byte lead', '%C2'),
+    (9, 'truncated 2-byte, bad continuation', '%C2A'),
+    (10, 'truncated 3-byte lead', '%E2'),
+    (11, 'truncated 3-byte, one continuation', '%E2%82'),
+    (12, 'truncated 3-byte, bad continuation', '%E2%82A'),
+    (13, 'truncated 4-byte lead', '%F0'),
+    (14, 'truncated 4-byte, one continuation', '%F0%9F'),
+    (15, 'truncated 4-byte, two continuations', '%F0%9F%92'),
+    (16, 'truncated 4-byte, bad continuation', '%F0%9F%92A'),
+    (17, 'overlong 2-byte slash', '%C0%AF'),
+    (18, 'overlong 3-byte slash', '%E0%80%AF'),
+    (19, 'overlong 4-byte slash', '%F0%80%80%AF'),
+    (20, 'overlong 2-byte NUL', '%C0%80'),
+    (21, 'overlong 3-byte NUL', '%E0%80%80'),
+    (22, 'overlong 4-byte NUL', '%F0%80%80%80'),
+    (23, 'overlong C1', '%C1%BF'),
+    (24, 'surrogate U+D800', '%ED%A0%80'),
+    (25, 'surrogate U+DFFF', '%ED%BF%BF'),
+    (26, 'CESU-8 surrogate pair', '%ED%A0%BD%ED%B2%A9'),
+    (27, 'past U+10FFFF, F4 90', '%F4%90%80%80'),
+    (28, 'past U+10FFFF, F5', '%F5%80%80%80'),
+    (29, 'past U+10FFFF, F7', '%F7%BF%BF%BF'),
+    (30, 'five-byte form F8', '%F8%88%80%80%80'),
+    (31, 'six-byte form FC', '%FC%84%80%80%80%80'),
+    (32, 'lone FE', '%FE'),
+    (33, 'lone FF', '%FF'),
+    (34, 'FE FF', '%FE%FF'),
+    (35, 'valid then invalid', '%C3%A9%FF'),
+    (36, 'invalid then valid', '%FF%C3%A9'),
+    (37, 'valid, invalid, valid', 'a%C3%A9%FFb%E2%82%ACc'),
+    (38, 'continuation then valid', '%80%E2%82%AC'),
+    (39, 'lead byte then valid', '%E2%C3%A9'),
+    (40, 'valid then lone continuation', '%E2%82%AC%A0'),
+    (41, 'four continuation bytes', '%80%81%82%83'),
+    (42, 'ASCII only', 'plain'),
+    (43, 'empty', '')
+)
+SELECT label,
+       hex(query_params_from_string('a=' || encoded)::VARCHAR),
+       hex(query_params_from_string(encoded || '=v')::VARCHAR)
+FROM cases
+ORDER BY id;
+----
+valid 2-byte U+0080	7B2261223A22C280227D	7B22C280223A2276227D
+valid 2-byte U+00E9	7B2261223A22C3A9227D	7B22C3A9223A2276227D
+valid 3-byte U+0800	7B2261223A22E0A080227D	7B22E0A080223A2276227D
+valid 3-byte U+20AC	7B2261223A22E282AC227D	7B22E282AC223A2276227D
+valid 3-byte U+FFFD	7B2261223A22EFBFBD227D	7B22EFBFBD223A2276227D
+valid 4-byte U+10000	7B2261223A22F0908080227D	7B22F0908080223A2276227D
+valid 4-byte U+10FFFF	7B2261223A22F48FBFBF227D	7B22F48FBFBF223A2276227D
+truncated 2-byte lead	7B2261223A22EFBFBD227D	7B22EFBFBD223A2276227D
+truncated 2-byte, bad continuation	7B2261223A22EFBFBD41227D	7B22EFBFBD41223A2276227D
+truncated 3-byte lead	7B2261223A22EFBFBD227D	7B22EFBFBD223A2276227D
+truncated 3-byte, one continuation	7B2261223A22EFBFBDEFBFBD227D	7B22EFBFBDEFBFBD223A2276227D
+truncated 3-byte, bad continuation	7B2261223A22EFBFBDEFBFBD41227D	7B22EFBFBDEFBFBD41223A2276227D
+truncated 4-byte lead	7B2261223A22EFBFBD227D	7B22EFBFBD223A2276227D
+truncated 4-byte, one continuation	7B2261223A22EFBFBDEFBFBD227D	7B22EFBFBDEFBFBD223A2276227D
+truncated 4-byte, two continuations	7B2261223A22EFBFBDEFBFBDEFBFBD227D	7B22EFBFBDEFBFBDEFBFBD223A2276227D
+truncated 4-byte, bad continuation	7B2261223A22EFBFBDEFBFBDEFBFBD41227D	7B22EFBFBDEFBFBDEFBFBD41223A2276227D
+overlong 2-byte slash	7B2261223A22EFBFBDEFBFBD227D	7B22EFBFBDEFBFBD223A2276227D
+overlong 3-byte slash	7B2261223A22EFBFBDEFBFBDEFBFBD227D	7B22EFBFBDEFBFBDEFBFBD223A2276227D
+overlong 4-byte slash	7B2261223A22EFBFBDEFBFBDEFBFBDEFBFBD227D	7B22EFBFBDEFBFBDEFBFBDEFBFBD223A2276227D
+overlong 2-byte NUL	7B2261223A22EFBFBDEFBFBD227D	7B22EFBFBDEFBFBD223A2276227D
+overlong 3-byte NUL	7B2261223A22EFBFBDEFBFBDEFBFBD227D	7B22EFBFBDEFBFBDEFBFBD223A2276227D
+overlong 4-byte NUL	7B2261223A22EFBFBDEFBFBDEFBFBDEFBFBD227D	7B22EFBFBDEFBFBDEFBFBDEFBFBD223A2276227D
+overlong C1	7B2261223A22EFBFBDEFBFBD227D	7B22EFBFBDEFBFBD223A2276227D
+surrogate U+D800	7B2261223A22EFBFBDEFBFBDEFBFBD227D	7B22EFBFBDEFBFBDEFBFBD223A2276227D
+surrogate U+DFFF	7B2261223A22EFBFBDEFBFBDEFBFBD227D	7B22EFBFBDEFBFBDEFBFBD223A2276227D
+CESU-8 surrogate pair	7B2261223A22EFBFBDEFBFBDEFBFBDEFBFBDEFBFBDEFBFBD227D	7B22EFBFBDEFBFBDEFBFBDEFBFBDEFBFBDEFBFBD223A2276227D
+past U+10FFFF, F4 90	7B2261223A22EFBFBDEFBFBDEFBFBDEFBFBD227D	7B22EFBFBDEFBFBDEFBFBDEFBFBD223A2276227D
+past U+10FFFF, F5	7B2261223A22EFBFBDEFBFBDEFBFBDEFBFBD227D	7B22EFBFBDEFBFBDEFBFBDEFBFBD223A2276227D
+past U+10FFFF, F7	7B2261223A22EFBFBDEFBFBDEFBFBDEFBFBD227D	7B22EFBFBDEFBFBDEFBFBDEFBFBD223A2276227D
+five-byte form F8	7B2261223A22EFBFBDEFBFBDEFBFBDEFBFBDEFBFBD227D	7B22EFBFBDEFBFBDEFBFBDEFBFBDEFBFBD223A2276227D
+six-byte form FC	7B2261223A22EFBFBDEFBFBDEFBFBDEFBFBDEFBFBDEFBFBD227D	7B22EFBFBDEFBFBDEFBFBDEFBFBDEFBFBDEFBFBD223A2276227D
+lone FE	7B2261223A22EFBFBD227D	7B22EFBFBD223A2276227D
+lone FF	7B2261223A22EFBFBD227D	7B22EFBFBD223A2276227D
+FE FF	7B2261223A22EFBFBDEFBFBD227D	7B22EFBFBDEFBFBD223A2276227D
+valid then invalid	7B2261223A22C3A9EFBFBD227D	7B22C3A9EFBFBD223A2276227D
+invalid then valid	7B2261223A22EFBFBDC3A9227D	7B22EFBFBDC3A9223A2276227D
+valid, invalid, valid	7B2261223A2261C3A9EFBFBD62E282AC63227D	7B2261C3A9EFBFBD62E282AC63223A2276227D
+continuation then valid	7B2261223A22EFBFBDE282AC227D	7B22EFBFBDE282AC223A2276227D
+lead byte then valid	7B2261223A22EFBFBDC3A9227D	7B22EFBFBDC3A9223A2276227D
+valid then lone continuation	7B2261223A22E282ACEFBFBD227D	7B22E282ACEFBFBD223A2276227D
+four continuation bytes	7B2261223A22EFBFBDEFBFBDEFBFBDEFBFBD227D	7B22EFBFBDEFBFBDEFBFBDEFBFBD223A2276227D
+ASCII only	7B2261223A22706C61696E227D	7B22706C61696E223A2276227D
+empty	7B2261223A22227D	7B22223A2276227D
+
+# The same sanitizer runs behind url_components and query_params, so an ill-formed sequence in a
+# full URL lands identically. The output stays valid UTF-8: the JSON round-trips back to U+FFFD.
+query II
+SELECT hex((url_components('https://example.com/?a=%ED%A0%80')).query_params::VARCHAR),
+       hex(query_params('https://example.com/?a=%ED%A0%80')::VARCHAR);
+----
+7B2261223A22EFBFBDEFBFBDEFBFBD227D	7B2261223A22EFBFBDEFBFBDEFBFBD227D
