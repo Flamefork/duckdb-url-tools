@@ -6,29 +6,47 @@ require url_tools
 
 require json
 
-# Absolute URL: all fields populated; scheme without ':', fragment without '#'.
+# Absolute URL, default 'raw' mode: scheme without ':', host without port, port as USMALLINT,
+# query undecoded and without '?', fragment without '#'.
 query I
-SELECT url_components('https://example.com:8443/path/to?q=1&q=2&encoded=a%20b#frag');
+SELECT url_components('https://sub.shop.co.uk:8443/p/x?a=1&b=%20&a=2#f');
 ----
-{'scheme': https, 'hostname': example.com, 'path': /path/to, 'query_params': '{"q":"2","encoded":"a b"}', 'fragment': frag}
+{'scheme': https, 'host': sub.shop.co.uk, 'port': 8443, 'path': /p/x, 'query': 'a=1&b=%20&a=2', 'fragment': f}
 
-# Non-special scheme keeps its authority.
+# The bare call is the 'raw' mode, spelled out or not.
+query I
+SELECT url_components('https://sub.shop.co.uk:8443/p/x?a=1&b=%20&a=2#f')
+     = url_components('https://sub.shop.co.uk:8443/p/x?a=1&b=%20&a=2#f', 'raw');
+----
+true
+
+# Non-special scheme keeps its authority; absent query/fragment are '', not NULL.
 query I
 SELECT url_components('goal://counter/signup');
 ----
-{'scheme': goal, 'hostname': counter, 'path': /signup, 'query_params': '{}', 'fragment': ''}
+{'scheme': goal, 'host': counter, 'port': NULL, 'path': /signup, 'query': '', 'fragment': ''}
 
-# Relative path input:
-# scheme/hostname are NULL, path/query_params/fragment parse per WHATWG.
-query I
-SELECT url_components('/search?q=%D0%BB&tab=products#top');
+# Port is NULL when absent or equal to the scheme's default (WHATWG normalization, as ada
+# reports it); a non-special scheme has no default, so its port survives.
+query IIIII
+SELECT (url_components('https://x.com:443/')).port,
+       (url_components('http://x.com:80/')).port,
+       (url_components('https://x.com/')).port,
+       (url_components('https://x.com:8443/')).port,
+       (url_components('goal://counter:443/')).port;
 ----
-{'scheme': NULL, 'hostname': NULL, 'path': /search, 'query_params': '{"q":"л","tab":"products"}', 'fragment': top}
+NULL	NULL	NULL	8443	443
+
+# Relative path input: scheme/host/port are NULL, path/query/fragment parse per WHATWG.
+query I
+SELECT url_components('/p?a=1#f');
+----
+{'scheme': NULL, 'host': NULL, 'port': NULL, 'path': /p, 'query': 'a=1', 'fragment': f}
 
 query I
 SELECT url_components('/');
 ----
-{'scheme': NULL, 'hostname': NULL, 'path': /, 'query_params': '{}', 'fragment': ''}
+{'scheme': NULL, 'host': NULL, 'port': NULL, 'path': /, 'query': '', 'fragment': ''}
 
 # Unparseable input is NULL, not an error: junk prose, invalid host, bare word.
 query III
@@ -54,9 +72,9 @@ NULL	NULL
 # Struct fields are individually addressable.
 query II
 SELECT (url_components('https://example.com/a?b=1')).path,
-       (url_components('/a?b=1')).query_params;
+       (url_components('/a?b=1')).query;
 ----
-/a	{"b":"1"}
+/a	b=1
 
 # Bulk parse over poison rows completes: one junk value must not fail the scan.
 query I
@@ -70,15 +88,141 @@ SELECT count(url_components(u)) FROM (VALUES
 ----
 2
 
-# Query params decode per WHATWG form semantics: last wins, '+' is space,
-# invalid percent-escapes pass through, invalid UTF-8 is sanitized to U+FFFD.
+# The query_values axis selects the result type: 'raw' hands back the query string, the parsed
+# modes hand back a MAP whose value type the mode picks.
 query IIII
-SELECT json_extract_string((url_components('https://example.com/?plus=a+b')).query_params, '$.plus'),
-       json_extract_string((url_components('https://example.com/?bad=%ZZ')).query_params, '$.bad'),
-       json_extract_string((url_components('https://example.com/?a=%D0')).query_params, '$.a') = chr(65533),
-       json_extract_string((url_components('/p?a=%D0')).query_params, '$.a') = chr(65533);
+SELECT typeof(url_components('https://x/')),
+       typeof((url_components('https://x/', 'first')).query_params),
+       typeof((url_components('https://x/', 'last')).query_params),
+       typeof((url_components('https://x/', 'all')).query_params);
+----
+STRUCT(scheme VARCHAR, host VARCHAR, port USMALLINT, path VARCHAR, query VARCHAR, fragment VARCHAR)	MAP(VARCHAR, VARCHAR)	MAP(VARCHAR, VARCHAR)	MAP(VARCHAR, VARCHAR[])
+
+# Same URL, the three parsed modes: a repeated key resolves to its first / last / every value in
+# occurrence order.
+query I
+SELECT url_components('https://sub.shop.co.uk:8443/p/x?a=1&b=%20&a=2#f', 'first');
+----
+{'scheme': https, 'host': sub.shop.co.uk, 'port': 8443, 'path': /p/x, 'query_params': {a=1, b=' '}, 'fragment': f}
+
+query I
+SELECT url_components('https://sub.shop.co.uk:8443/p/x?a=1&b=%20&a=2#f', 'last');
+----
+{'scheme': https, 'host': sub.shop.co.uk, 'port': 8443, 'path': /p/x, 'query_params': {a=2, b=' '}, 'fragment': f}
+
+query I
+SELECT url_components('https://sub.shop.co.uk:8443/p/x?a=1&b=%20&a=2#f', 'all');
+----
+{'scheme': https, 'host': sub.shop.co.uk, 'port': 8443, 'path': /p/x, 'query_params': {a=[1, 2], b=[' ']}, 'fragment': f}
+
+# Key-set invariance: the mode changes values, never the set or order of keys.
+query III
+SELECT map_keys((url_components('https://x/?a=1&b=2&a=3', 'first')).query_params),
+       map_keys((url_components('https://x/?a=1&b=2&a=3', 'last')).query_params),
+       map_keys((url_components('https://x/?a=1&b=2&a=3', 'all')).query_params);
+----
+[a, b]	[a, b]	[a, b]
+
+# 'first' and 'last' are the ends of the 'all' list, per key.
+query II
+SELECT (url_components('https://x/?a=1&b=2&a=3', 'first')).query_params['a']
+     = (url_components('https://x/?a=1&b=2&a=3', 'all')).query_params['a'][1],
+       (url_components('https://x/?a=1&b=2&a=3', 'last')).query_params['a']
+     = (url_components('https://x/?a=1&b=2&a=3', 'all')).query_params['a'][-1];
+----
+true	true
+
+# Key uniqueness is our invariant — DuckDB does not check a hand-written map vector — so a
+# repeated key is exactly one entry in every mode, whatever the mode does with its values.
+query IIII
+SELECT cardinality((url_components('https://x/?a=1&a=2&a=3', 'last')).query_params),
+       (url_components('https://x/?a=1&a=2&a=3', 'last')).query_params,
+       cardinality((url_components('https://x/?a=1&a=2&a=3', 'all')).query_params),
+       (url_components('https://x/?a=1&a=2&a=3', 'all')).query_params;
+----
+1	{a=3}	1	{a=[1, 2, 3]}
+
+# Sanitization happens before dedup, not after: two distinct ill-formed keys collapse onto the
+# same U+FFFD string, and it is that string which lands in the map — so it is that string the
+# dedup must see. Deduping on the raw bytes would write the same key twice.
+query IIII
+SELECT cardinality((url_components('https://x/?%FF=1&%FE=2', 'last')).query_params),
+       (url_components('https://x/?%FF=1&%FE=2', 'last')).query_params[chr(65533)],
+       cardinality((url_components('https://x/?%FF=1&%FE=2', 'all')).query_params),
+       (url_components('https://x/?%FF=1&%FE=2', 'all')).query_params[chr(65533)];
+----
+1	2	1	[1, 2]
+
+# A parseable URL with no query part yields an EMPTY map, not a NULL one; the NULL map belongs to
+# the NULL row of unparseable input.
+query IIII
+SELECT (url_components('https://example.com/path', 'last')).query_params,
+       cardinality((url_components('https://example.com/path', 'last')).query_params),
+       (url_components('https://example.com/path', 'all')).query_params IS NULL,
+       url_components('not a url', 'all') IS NULL;
+----
+{}	0	false	true
+
+# The struct's query_params field is the standalone function's map, mode for mode — escape-heavy
+# and sanitized values included.
+query I
+SELECT count(*) FROM (VALUES
+    ('https://x.ru/?a=1&b=2&a=3'),
+    ('https://x.ru/?plus=a+b&flag&eq=a=b'),
+    ('https://x.ru/?q=%22quoted%22%5C&nl=%0A&nonascii=%D0%BB'),
+    ('https://x.ru/?bad=%FF'),
+    ('https://x.ru/path'),
+    ('/relative?c=d')
+) t(u)
+WHERE (url_components(u, 'last')).query_params IS DISTINCT FROM query_params(u, 'last')
+   OR (url_components(u, 'all')).query_params IS DISTINCT FROM query_params(u, 'all');
+----
+0
+
+# Values decode per WHATWG form semantics in every parsed mode: '+' is space, invalid
+# percent-escapes pass through, invalid UTF-8 is sanitized to U+FFFD.
+query IIII
+SELECT (url_components('https://example.com/?plus=a+b', 'last')).query_params['plus'],
+       (url_components('https://example.com/?bad=%ZZ', 'last')).query_params['bad'],
+       (url_components('https://example.com/?a=%D0', 'last')).query_params['a'] = chr(65533),
+       (url_components('/p?a=%D0', 'all')).query_params['a'] = [chr(65533)];
 ----
 a b	%ZZ	true	true
+
+# The axis selects the result type, so it must be a constant the binder can resolve to a known
+statement error
+SELECT url_components('https://x/', 'typo');
+----
+Binder Error: url_components: unknown query_values 'typo', expected one of 'raw', 'first', 'last', 'all'
+
+statement error
+SELECT url_components(u, m) FROM (VALUES ('https://x/', 'last')) t(u, m);
+----
+Binder Error: url_components: query_values must be a constant, one of 'raw', 'first', 'last', 'all'
+
+statement error
+SELECT url_components('https://x/', NULL);
+----
+Binder Error: url_components: query_values must not be NULL, expected one of 'raw', 'first', 'last', 'all'
+
+# Bulk scan in a parsed mode, mixing every input class across chunk boundaries: the maps stay
+# well-formed (one entry per key) and no row kills the scan.
+statement ok
+CREATE TABLE mixed AS SELECT CASE i % 5
+    WHEN 0 THEN 'junk ' || i
+    WHEN 1 THEN NULL
+    WHEN 2 THEN 'https://e.com/p?a=' || i || '&a=' || i || '&b=x'
+    WHEN 3 THEN '/rel?q=' || i
+    ELSE 'https://e.com/no-query' END AS u
+FROM range(10000) t(i);
+
+query III
+SELECT count(c) AS parsed_rows,
+       sum(cardinality(c.query_params)) AS entries,
+       count(*) FILTER (WHERE len(map_keys(c.query_params)) <> len(list_distinct(map_keys(c.query_params)))) AS duplicate_key_rows
+FROM (SELECT url_components(u, 'all') AS c FROM mixed);
+----
+6000	6000	0
 
 # The connection is still usable after junk input (no invalidation).
 query I

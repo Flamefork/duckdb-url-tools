@@ -1,0 +1,99 @@
+# name: test/sql/query_param.test
+# description: query_param extracts the decoded value of one query key, without building a map
+# group: [sql]
+
+require url_tools
+
+# The default is 'last' (v1's last-wins reading of a repeated key); 'first' takes the other end.
+query III
+SELECT query_param('https://x/?a=1&a=2', 'a'),
+       query_param('https://x/?a=1&a=2', 'a', 'first'),
+       query_param('https://x/?a=1&a=2', 'a', 'last');
+----
+2	1	2
+
+# A key present with an empty value is '', which is not the absent key's NULL.
+query IIII
+SELECT query_param('https://x/?flag&b=1', 'flag'),
+       query_param('https://x/?empty=&b=1', 'empty'),
+       query_param('https://x/?b=1', 'a') IS NULL,
+       query_param('https://x/?flag&b=1', 'flag') IS NULL;
+----
+(empty)	(empty)	true	false
+
+# Values decode per WHATWG form semantics, keys included: '+' as space, percent-escapes, and
+# ill-formed UTF-8 sanitized to U+FFFD — the same repair the map keys get, so a repaired key is
+# still reachable by name.
+query IIII
+SELECT query_param('https://x/?plus=a+b', 'plus'),
+       query_param('https://x/?q=%D0%BB', 'q'),
+       query_param('https://x/?a b=1', 'a b'),
+       query_param('https://x/?%FF=1', chr(65533));
+----
+a b	л	1	1
+
+# Same inputs as url_components: any scheme, relative paths; no query, junk, empty and NULL
+# inputs — and a NULL key — yield NULL.
+query IIIIII
+SELECT query_param('myapp://open?screen=cart', 'screen'),
+       query_param('/search?q=1&tab=products', 'tab'),
+       query_param('https://x/path', 'a') IS NULL,
+       query_param('junk', 'a') IS NULL,
+       query_param('', 'a') IS NULL,
+       query_param(NULL, 'a') IS NULL AND query_param('https://x/?a=1', NULL) IS NULL;
+----
+cart	products	true	true	true	true
+
+# Point/object agreement (law 3): the scalar is exactly the map entry, in both modes — including
+# an absent key and an empty value.
+query I
+SELECT count(*) FROM (VALUES
+    ('https://x/?a=1&a=2', 'a'),
+    ('https://x/?a=1&b=2', 'b'),
+    ('https://x/?flag&b=1', 'flag'),
+    ('https://x/?b=1', 'absent'),
+    ('https://x/?%FF=1', chr(65533)),
+    ('/rel?c=d', 'c'),
+    ('junk', 'a'),
+    (NULL, 'a')
+) t(u, k)
+WHERE query_param(u, k, 'first') IS DISTINCT FROM query_params(u, 'first')[k]
+   OR query_param(u, k, 'last') IS DISTINCT FROM query_params(u, 'last')[k];
+----
+0
+
+# 'all' has no scalar answer; the error says where to get the list instead.
+statement error
+SELECT query_param('https://x/?a=1', 'a', 'all');
+----
+Binder Error: query_param: query_values 'all' has no scalar result, use query_params(url, 'all')
+
+# The axis is bind-time even though the result type does not depend on it: an unknown mode is a
+# caller bug, and a caller bug is not worth a scan.
+statement error
+SELECT query_param('https://x/?a=1', 'a', 'typo');
+----
+Binder Error: query_param: unknown query_values 'typo', expected one of 'first', 'last'
+
+statement error
+SELECT query_param('https://x/?a=1', 'a', NULL);
+----
+Binder Error: query_param: query_values must not be NULL, expected one of 'first', 'last'
+
+statement error
+SELECT query_param(u, 'a', m) FROM (VALUES ('https://x/?a=1', 'last')) t(u, m);
+----
+Binder Error: query_param: query_values must be a constant, one of 'first', 'last'
+
+# Bulk scan over every input class, with the key varying per row: no row kills the scan.
+query II
+SELECT count(*), count(query_param(u, 'a'))
+FROM (SELECT CASE i % 5
+    WHEN 0 THEN 'junk ' || i
+    WHEN 1 THEN NULL
+    WHEN 2 THEN 'https://e.com/p?a=' || i || '&a=' || i
+    WHEN 3 THEN '/rel?a=' || i
+    ELSE 'https://e.com/no-query' END AS u
+FROM range(10000) t(i));
+----
+10000	4000

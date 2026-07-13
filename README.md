@@ -11,31 +11,62 @@ Built on [ada](https://github.com/ada-url/ada), the WHATWG-compliant URL parser 
 
 ## Functions
 
-- **`url_components(text)`**: Parses a URL into `STRUCT(scheme, hostname, path, query_params JSON, fragment)`. Absolute URLs of any scheme yield all fields; relative paths (`/path?q=1`) yield `NULL` scheme/hostname; unparseable input yields `NULL`.
-- **`query_params(text)`**: Extracts decoded query parameters from a URL (same inputs as `url_components`) as a JSON object. Input without a parseable query yields `{}`.
-- **`query_params_from_string(text[, separator])`**: Parses a bare query string (`utm_source=x&utm_medium=y`, no URL around it) into a JSON object. A leading `?` is tolerated. The optional pair separator (default `&`) covers formats like `key=v1|key2=v2`.
+- **`url_components(text[, query_values])`**: Parses a URL into a `STRUCT` of its WHATWG components. Absolute URLs of any scheme yield all fields; relative paths (`/path?q=1`) yield `NULL` scheme/host/port; unparseable input yields `NULL`. The optional `query_values` argument picks how the query is reported, may be passed by name (`url_components(url, query_values := 'all')`), and must be a constant:
+  - `'raw'` (default) — `STRUCT(scheme, host, port USMALLINT, path, query, fragment)`, with `query` the undecoded query string. Nothing is decoded, so this is the cheapest form.
+  - `'first'` / `'last'` — `query` is replaced by `query_params MAP(VARCHAR, VARCHAR)`, holding the first / last value of every key.
+  - `'all'` — `query_params MAP(VARCHAR, VARCHAR[])`, holding every value of every key in occurrence order.
 
-Query parameters decode per WHATWG form semantics: percent-escapes and `+` as space; repeated keys resolve last-wins; percent-decoded bytes that are not valid UTF-8 are sanitized with U+FFFD.
+  `port` is `NULL` when the URL carries no port or the port is the scheme's default (`https://x.com:443/` → `NULL`, `https://x.com:8443/` → `8443`).
+- **`query_params(text[, query_values])`**: Extracts decoded query parameters from a URL (same inputs as `url_components`) as a `MAP`. Input without a parseable query yields an empty map. `query_values` is the same axis as above, minus `'raw'`:
+  - `'all'` (default) — `MAP(VARCHAR, VARCHAR[])`, every value of every key in occurrence order (a single-valued key is a one-element list).
+  - `'first'` / `'last'` — `MAP(VARCHAR, VARCHAR)`, the first / last value of every key.
+- **`query_params_from_string(text[, sep[, query_values]])`**: Parses a bare query string (`utm_source=x&utm_medium=y`, no URL around it) into the same `MAP`. A leading `?` is tolerated. The optional pair separator `sep` (default `&`) covers formats like `key=v1|key2=v2`.
+- **`query_param(text, key[, query_values])`**: The decoded value of one key, `VARCHAR`, without building a map. `query_values` is `'last'` (default) or `'first'`; `'all'` has no scalar result — use `query_params(url, 'all')`. An absent key yields `NULL`, a key present with an empty value yields `''`.
+
+The key set and its order (first occurrence) are the same in every mode — the mode changes values only. Every key appears exactly once.
+
+Query parameters decode per WHATWG form semantics: percent-escapes and `+` as space; percent-decoded bytes that are not valid UTF-8 are sanitized with U+FFFD.
+
+`query_values` selects the result type, so it must be a constant; an unknown mode, a `NULL`, or a column reference is a bind-time error. Any optional argument may be passed by name (`query_params_from_string(qs, query_values := 'last')` leaves `sep` at its default).
 
 ## Quick Start
 
 ```sql
 LOAD './build/release/extension/url_tools/url_tools.duckdb_extension';
 
-SELECT url_components('https://example.com/path?utm_source=duckdb#top');
--- {'scheme': https, 'hostname': example.com, 'path': /path, 'query_params': '{"utm_source":"duckdb"}', 'fragment': top}
+SELECT url_components('https://example.com:8443/path?utm_source=duckdb&id=1&id=2#top');
+-- {'scheme': https, 'host': example.com, 'port': 8443, 'path': /path, 'query': 'utm_source=duckdb&id=1&id=2', 'fragment': top}
 
-SELECT url_components('/search?q=%D0%BB&tab=products');
--- {'scheme': NULL, 'hostname': NULL, 'path': /search, 'query_params': '{"q":"л","tab":"products"}', 'fragment': ''}
+SELECT url_components('/search?q=%D0%BB&tab=products', 'last');
+-- {'scheme': NULL, 'host': NULL, 'port': NULL, 'path': /search, 'query_params': {q=л, tab=products}, 'fragment': ''}
 
-SELECT query_params('myapp://open?screen=cart&promo=x');
--- {"screen":"cart","promo":"x"}
+SELECT (url_components('https://example.com/?id=1&id=2', query_values := 'all')).query_params;
+-- {id=[1, 2]}
 
-SELECT query_params_from_string('utm_source=yandex&plus=a+b');
+SELECT (url_components('https://example.com/?utm_source=duckdb', 'last')).query_params['utm_source'];
+-- duckdb
+
+SELECT query_params('myapp://open?screen=cart&promo=x&promo=y');
+-- {screen=[cart], promo=[x, y]}
+
+SELECT query_params('myapp://open?screen=cart&promo=x&promo=y', 'last');
+-- {screen=cart, promo=y}
+
+SELECT query_param('https://example.com/?utm_source=duckdb&id=1', 'utm_source');
+-- duckdb
+
+SELECT query_params_from_string('utm_source=yandex&plus=a+b', query_values := 'last');
+-- {utm_source=yandex, plus=a b}
+
+SELECT query_params_from_string('wp1=fb_smm|wp2=post+15%2F06', '|', 'last');
+-- {wp1=fb_smm, wp2=post 15/06}
+```
+
+A `MAP` result carries the same object a JSON string would, without the serialize/parse round trip — and `CAST(m AS JSON)` still gives you the JSON spelling when you want it:
+
+```sql
+SELECT CAST(query_params_from_string('utm_source=yandex&plus=a+b', query_values := 'last') AS JSON);
 -- {"utm_source":"yandex","plus":"a b"}
-
-SELECT query_params_from_string('wp1=fb_smm|wp2=post+15%2F06', '|');
--- {"wp1":"fb_smm","wp2":"post 15/06"}
 ```
 
 ## Development

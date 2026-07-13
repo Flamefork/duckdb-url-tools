@@ -1,0 +1,159 @@
+# name: test/sql/named_arguments.test
+# description: Optional axis arguments can be named; an unknown name is a loud bind error
+# group: [sql]
+
+require url_tools
+
+# The axis is spelled `query_values` on every function rather than `values`: `values` is a DuckDB
+# keyword, and the named-argument grammar takes an unreserved name — `f(u, values := 'last')` does
+# not parse at all, while one vocabulary across the surface costs nothing.
+
+# Verification re-plans every statement (copy, deserialize, prepared): a named axis has to survive
+# each of those round-trips, so every case below runs under it.
+statement ok
+PRAGMA enable_verification;
+
+# The alias only says which optional an argument is: a named call is the positional call.
+query IIII
+SELECT url_components('https://x/?a=1&a=2', query_values := 'raw') = url_components('https://x/?a=1&a=2', 'raw'),
+       url_components('https://x/?a=1&a=2', query_values := 'first') = url_components('https://x/?a=1&a=2', 'first'),
+       url_components('https://x/?a=1&a=2', query_values := 'last') = url_components('https://x/?a=1&a=2', 'last'),
+       url_components('https://x/?a=1&a=2', query_values := 'all') = url_components('https://x/?a=1&a=2', 'all');
+----
+true	true	true	true
+
+# The bare call and the named 'raw' are the same call, type included.
+query II
+SELECT url_components('https://x/?a=1&a=2') = url_components('https://x/?a=1&a=2', query_values := 'raw'),
+       typeof(url_components('https://x/', query_values := 'all')) = typeof(url_components('https://x/', 'all'));
+----
+true	true
+
+# The named axis picks the result type exactly as the positional one does.
+query I
+SELECT typeof((url_components('https://x/', query_values := 'all')).query_params);
+----
+MAP(VARCHAR, VARCHAR[])
+
+# An unknown name is a caller bug, not a positional argument: without this check
+# url_components(u, typo := 'all') would silently mean url_components(u, 'all').
+statement error
+SELECT url_components('https://x/', typo := 'all');
+----
+Binder Error: url_components: Unknown argument 'typo'
+
+# Naming the axis does not soften the errors that guard it.
+statement error
+SELECT url_components('https://x/', query_values := 'typo');
+----
+Binder Error: url_components: unknown query_values 'typo', expected one of 'raw', 'first', 'last', 'all'
+
+statement error
+SELECT url_components('https://x/', query_values := NULL);
+----
+Binder Error: url_components: query_values must not be NULL, expected one of 'raw', 'first', 'last', 'all'
+
+statement error
+SELECT url_components(u, query_values := m) FROM (VALUES ('https://x/', 'last')) t(u, m);
+----
+Binder Error: url_components: query_values must be a constant, one of 'raw', 'first', 'last', 'all'
+
+# A placeholder in the axis cannot be resolved at prepare time, so the bind is deferred: the
+# statement prepares, and each EXECUTE binds the mode — and the result type — from the actual value.
+statement ok
+PREPARE named_axis AS SELECT (url_components($1, query_values := $2)).query_params;
+
+query I
+EXECUTE named_axis('https://x/?a=1&a=2', 'all');
+----
+{a=[1, 2]}
+
+query I
+EXECUTE named_axis('https://x/?a=1&a=2', 'last');
+----
+{a=2}
+
+statement error
+EXECUTE named_axis('https://x/?a=1', 'typo');
+----
+Binder Error: url_components: unknown query_values 'typo', expected one of 'raw', 'first', 'last', 'all'
+
+# The deferred bind still sees the alias: a misnamed placeholder argument is reported when the
+# statement is executed, which is the first point at which it can be bound at all.
+statement ok
+PREPARE misnamed_axis AS SELECT url_components($1, typo := $2);
+
+statement error
+EXECUTE misnamed_axis('https://x/?a=1', 'all');
+----
+Binder Error: url_components: Unknown argument 'typo'
+
+# The param functions carry the same axis, named the same way.
+query II
+SELECT query_params('https://x/?a=1&a=2', query_values := 'last') = query_params('https://x/?a=1&a=2', 'last'),
+       query_param('https://x/?a=1&a=2', 'a', query_values := 'first')
+     = query_param('https://x/?a=1&a=2', 'a', 'first');
+----
+true	true
+
+# Two same-typed optionals: the alias is the only thing that can tell them apart. Naming both, in
+# order, is the unambiguous spelling.
+query I
+SELECT query_params_from_string('k=v1|k2=v2', sep := '|', query_values := 'first');
+----
+{k=v1, k2=v2}
+
+# The tricky one: naming the SECOND optional without supplying the first. Position cannot
+# disambiguate (both optionals are VARCHAR), so the alias must — `sep` stays at its default '&'.
+query II
+SELECT query_params_from_string('a=1&b=2&a=3', query_values := 'last'),
+       typeof(query_params_from_string('a=1', query_values := 'all'));
+----
+{a=3, b=2}	MAP(VARCHAR, VARCHAR[])
+
+# And its mirror image: an UNNAMED second argument is still a separator, never the axis. If this
+# ever flipped, query_params_from_string(qs, '|') would silently parse on '&' instead.
+query II
+SELECT query_params_from_string('k=v1|k2=v2', '|'),
+       query_params_from_string('a=1&b=2', 'last');
+----
+{k=[v1], k2=[v2]}	{a=['1&b=2']}
+
+# Naming an optional does not shift the ones after it: an argument's position still names it, so
+# the third argument is the axis whatever the second was called.
+statement error
+SELECT query_params_from_string('a=1', sep := '|', '&');
+----
+Binder Error: query_params_from_string: unknown query_values '&', expected one of 'all', 'first', 'last'
+
+# The same argument given by position and by name is a caller bug, not a silent overwrite.
+statement error
+SELECT query_params_from_string('a=1', '|', sep := '&');
+----
+Binder Error: query_params_from_string: argument 'sep' specified more than once
+
+statement error
+SELECT query_params_from_string('a=1', typo := '|');
+----
+Binder Error: query_params_from_string: Unknown argument 'typo'
+
+statement error
+SELECT query_params('https://x/', typo := 'all');
+----
+Binder Error: query_params: Unknown argument 'typo'
+
+statement error
+SELECT query_param('https://x/?a=1', 'a', typo := 'first');
+----
+Binder Error: query_param: Unknown argument 'typo'
+
+# Which argument is the separator is bind data an alias-free re-bind cannot recover, so it travels
+# with the plan: a prepared statement (bound once, executed later) must not re-read the axis
+# constant as a separator.
+statement ok
+PREPARE named_sep AS SELECT query_params_from_string($1, query_values := 'last');
+
+query I
+EXECUTE named_sep('a=1&b=2&a=3');
+----
+{a=3, b=2}

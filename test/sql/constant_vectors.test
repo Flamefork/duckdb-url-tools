@@ -1,0 +1,55 @@
+# name: test/sql/constant_vectors.test
+# description: an all-constant call answers with a constant vector, and one written row stands for the chunk
+# group: [sql]
+
+require url_tools
+
+# The functions that write their result vector by hand (url_components, query_params,
+# query_params_from_string) own the constant-vector contract that Unary/BinaryExecutor carries for
+# the rest: when every argument is constant, the result must be a CONSTANT_VECTOR whose row 0 is the
+# answer for the whole chunk. Constant folding hides half of it — it always evaluates one row — so
+# the executor's own path is exercised here with the rewriter turned off, over a chunk of many rows.
+statement ok
+SET disabled_optimizers='expression_rewriter';
+
+# Row 0 is the only row written; every other row of the chunk must read it back unchanged.
+query I
+SELECT DISTINCT query_params('https://x/?a=1&a=2&b=3', 'last') FROM range(3000);
+----
+{a=2, b=3}
+
+query I
+SELECT DISTINCT query_params_from_string('a=1|a=2|b=3', '|', 'all') FROM range(3000);
+----
+{a=[1, 2], b=[3]}
+
+query I
+SELECT DISTINCT url_components('https://sub.x.co:8443/p?a=1&a=2#f', 'all') FROM range(3000);
+----
+{'scheme': https, 'host': sub.x.co, 'port': 8443, 'path': /p, 'query_params': {a=[1, 2]}, 'fragment': f}
+
+query I
+SELECT DISTINCT url_components('https://sub.x.co:8443/p?a=1&a=2#f') FROM range(3000);
+----
+{'scheme': https, 'host': sub.x.co, 'port': 8443, 'path': /p, 'query': 'a=1&a=2', 'fragment': f}
+
+# A NULL row is a constant too: the struct and every one of its children have to carry the NULL,
+# and an empty map has to keep its list entry inside the chunk's child range.
+query III
+SELECT DISTINCT url_components(NULL) IS NULL, query_params(NULL) IS NULL, cardinality(query_params('junk'))
+FROM range(3000);
+----
+true	true	0
+
+statement ok
+RESET disabled_optimizers;
+
+# The folded spelling of the same calls: here the executor evaluates one row and demands the
+# constant vector back. Both halves of the contract, one file.
+query IIII
+SELECT query_params('https://x/?a=1&a=2&b=3', 'last'),
+       query_params_from_string('a=1|a=2|b=3', '|', 'all'),
+       (url_components('https://sub.x.co:8443/p?a=1&a=2#f', 'all')).query_params,
+       url_components(NULL) IS NULL;
+----
+{a=2, b=3}	{a=[1, 2], b=[3]}	{a=[1, 2]}	true

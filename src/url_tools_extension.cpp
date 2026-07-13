@@ -2,21 +2,25 @@
 
 #include "url_tools_extension.hpp"
 #include "duckdb.hpp"
-#include "duckdb/common/allocator.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/serializer/deserializer.hpp"
+#include "duckdb/common/serializer/serializer.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/types/vector.hpp"
+#include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/execution/expression_executor_state.hpp"
 #include "duckdb/function/scalar_function.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "ada.h"
 #include "utf8proc_wrapper.hpp"
-#include "../duckdb/extension/json/include/json_common.hpp"
 #include "ankerl/unordered_dense.h"
-#include "yyjson.hpp"
 
 #include <algorithm>
-#include <cstdlib>
-#include <memory>
+#include <charconv>
+#include <deque>
+#include <iterator>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -25,41 +29,69 @@ namespace duckdb {
 
 namespace {
 
-using duckdb_yyjson::yyjson_mut_doc;
-using duckdb_yyjson::yyjson_mut_doc_new;
-using duckdb_yyjson::yyjson_mut_doc_set_root;
-using duckdb_yyjson::yyjson_mut_obj;
-using duckdb_yyjson::yyjson_mut_obj_add;
-using duckdb_yyjson::yyjson_mut_val;
-using duckdb_yyjson::yyjson_mut_write_opts;
+// How the values of a repeated query key are reported. The axis selects the result type, so it
+// is resolved at bind time, never per row.
+enum class QueryValuesMode : uint8_t { RAW, FIRST, LAST, ALL };
 
-struct YyjsonMutDocDeleter {
-	void operator()(yyjson_mut_doc *doc) const {
-		duckdb_yyjson::yyjson_mut_doc_free(doc);
-	}
+struct QueryValuesModeName {
+	const char *name;
+	QueryValuesMode mode;
 };
-using yyjson_mut_doc_ptr = std::unique_ptr<yyjson_mut_doc, YyjsonMutDocDeleter>;
+
+// The modes each axis accepts, in the order its error messages list them. 'raw' is url_components'
+// alone (hand back the query string and parse nothing); 'all' is not available where the result is
+// a scalar.
+constexpr QueryValuesModeName COMPONENT_MODES[] = {{"raw", QueryValuesMode::RAW},
+                                                   {"first", QueryValuesMode::FIRST},
+                                                   {"last", QueryValuesMode::LAST},
+                                                   {"all", QueryValuesMode::ALL}};
+constexpr QueryValuesModeName MAP_MODES[] = {
+    {"all", QueryValuesMode::ALL}, {"first", QueryValuesMode::FIRST}, {"last", QueryValuesMode::LAST}};
+constexpr QueryValuesModeName SCALAR_MODES[] = {{"first", QueryValuesMode::FIRST}, {"last", QueryValuesMode::LAST}};
+
+struct ValuesAxis {
+	const char *function_name;
+	const char *parameter_name;
+	const QueryValuesModeName *modes;
+	idx_t mode_count;
+};
+
+constexpr ValuesAxis URL_COMPONENTS_AXIS {"url_components", "query_values", COMPONENT_MODES,
+                                          std::size(COMPONENT_MODES)};
+constexpr ValuesAxis QUERY_PARAMS_AXIS {"query_params", "query_values", MAP_MODES, std::size(MAP_MODES)};
+constexpr ValuesAxis QUERY_PARAMS_FROM_STRING_AXIS {"query_params_from_string", "query_values", MAP_MODES,
+                                                    std::size(MAP_MODES)};
+constexpr ValuesAxis QUERY_PARAM_AXIS {"query_param", "query_values", SCALAR_MODES, std::size(SCALAR_MODES)};
+
+// Every occurrence of every key, in arrival order; `next` chains the occurrences that share a
+// key. One collection pass therefore serves all three value modes: 'first' and 'last' read the
+// ends of a chain, 'all' walks it.
+struct UrlToolsQueryValue {
+	std::string_view value;
+	idx_t next;
+};
 
 struct UrlToolsQueryParam {
 	std::string_view key;
-	std::string_view value;
+	idx_t first_value;
+	idx_t last_value;
+	idx_t count;
 };
 
 struct UrlToolsLocalState : public FunctionLocalState {
-	explicit UrlToolsLocalState(Allocator &allocator) : json_allocator(std::make_shared<JSONAllocator>(allocator)) {
-	}
-
-	shared_ptr<JSONAllocator> json_allocator;
 	vector<UrlToolsQueryParam> query_params;
 	ankerl::unordered_dense::map<std::string_view, idx_t> query_param_index;
+	vector<UrlToolsQueryValue> query_values;
 	vector<std::pair<std::string, std::string>> decoded_pairs;
+	// Sanitized copies of the keys/values that needed one. A deque, not a vector: the collection
+	// holds views into these strings while more are still being appended.
+	std::deque<std::string> sanitized;
 	std::string url_buffer;
 };
 
-static unique_ptr<FunctionLocalState> UrlToolsInitLocalState(ExpressionState &state, const BoundFunctionExpression &,
+static unique_ptr<FunctionLocalState> UrlToolsInitLocalState(ExpressionState &, const BoundFunctionExpression &,
                                                              FunctionData *) {
-	auto &context = state.GetContext();
-	return make_uniq<UrlToolsLocalState>(BufferAllocator::Get(context));
+	return make_uniq<UrlToolsLocalState>();
 }
 
 static std::string_view StripLeadingChar(std::string_view input, char prefix) {
@@ -107,37 +139,50 @@ static string UrlToolsSanitizeUtf8(std::string_view value) {
 	return out;
 }
 
-// Query keys/values are percent-decoded, so they can carry bytes that are not
-// valid UTF-8 (e.g. percent-decoding yields a truncated multi-byte sequence).
-// yyjson refuses to serialize invalid UTF-8 and would fail the whole call;
-// sanitize first so the functions stay total over arbitrary URL input.
-static yyjson_mut_val *UrlToolsCopiedString(yyjson_mut_doc *doc, std::string_view value) {
+// Percent-decoding yields arbitrary bytes, and a DuckDB VARCHAR may not carry ill-formed UTF-8, so
+// every key and value is repaired on the way into the collection — not on the way out. Sanitizing
+// this early is what keeps map keys unique: distinct raw keys can collapse onto the same repaired
+// string (every ill-formed byte becomes U+FFFD), and it is the repaired string that lands in the
+// result, so it must be the one the dedup index sees.
+static std::string_view UrlToolsWellFormed(UrlToolsLocalState &local_state, std::string_view value) {
 	auto data = value.empty() ? "" : value.data();
-	if (!Utf8Proc::IsValid(data, value.size())) {
-		auto sanitized = UrlToolsSanitizeUtf8(value);
-		auto string_value = yyjson_mut_strncpy(doc, sanitized.c_str(), sanitized.size());
-		if (!string_value) {
-			throw InternalException("url_tools: failed to allocate string value");
-		}
-		return string_value;
+	if (Utf8Proc::IsValid(data, value.size())) {
+		return value;
 	}
-	auto string_value = yyjson_mut_strncpy(doc, data, value.size());
-	if (!string_value) {
-		throw InternalException("url_tools: failed to allocate string value");
-	}
-	return string_value;
+	return local_state.sanitized.emplace_back(UrlToolsSanitizeUtf8(value));
 }
 
-// Repeated keys resolve last-wins while keeping first-occurrence order: the index
-// map is only ever written on insert (try_emplace, never operator[]), so a repeat
-// updates the value in place instead of moving the key to the back.
+static string_t UrlToolsAddString(Vector &vec, std::string_view value) {
+	return StringVector::AddString(vec, value.empty() ? "" : value.data(), value.size());
+}
+
+// Repeated keys keep first-occurrence order: the index map is only ever written on insert
+// (try_emplace, never operator[]), so a repeat extends the key's value chain instead of moving
+// the key to the back. One entry per key is what makes the written MAP valid — DuckDB does not
+// check key uniqueness of a hand-written map vector in release builds.
 static void UrlToolsPutQueryParam(UrlToolsLocalState &local_state, std::string_view key, std::string_view value) {
-	auto [entry, inserted] = local_state.query_param_index.try_emplace(key, local_state.query_params.size());
+	auto well_formed_key = UrlToolsWellFormed(local_state, key);
+	auto value_index = local_state.query_values.size();
+	local_state.query_values.push_back({UrlToolsWellFormed(local_state, value), DConstants::INVALID_INDEX});
+
+	auto [entry, inserted] =
+	    local_state.query_param_index.try_emplace(well_formed_key, local_state.query_params.size());
 	if (inserted) {
-		local_state.query_params.push_back({key, value});
+		local_state.query_params.push_back({well_formed_key, value_index, value_index, 1});
 	} else {
-		local_state.query_params[entry->second].value = value;
+		auto &param = local_state.query_params[entry->second];
+		local_state.query_values[param.last_value].next = value_index;
+		param.last_value = value_index;
+		param.count++;
 	}
+}
+
+static void UrlToolsClearQueryParams(UrlToolsLocalState &local_state) {
+	local_state.query_params.clear();
+	local_state.query_param_index.clear();
+	local_state.query_values.clear();
+	local_state.decoded_pairs.clear();
+	local_state.sanitized.clear();
 }
 
 // Splits a query string on a custom pair separator, mirroring the WHATWG form
@@ -148,7 +193,6 @@ static void UrlToolsPutQueryParam(UrlToolsLocalState &local_state, std::string_v
 static void UrlToolsCollectCustomSeparated(std::string_view query, std::string_view separator,
                                            UrlToolsLocalState &local_state) {
 	auto &pairs = local_state.decoded_pairs;
-	pairs.clear();
 	auto input = query;
 	while (!input.empty()) {
 		auto separator_index = input.find(separator);
@@ -172,58 +216,99 @@ static void UrlToolsCollectCustomSeparated(std::string_view query, std::string_v
 	}
 }
 
-// Builds the query_params JSON object from a raw (undecoded, no leading '?') query
-// string. Decoding follows WHATWG form semantics: percent-escapes and '+' as space;
-// repeated keys resolve last-wins.
-static yyjson_mut_val *UrlToolsBuildQueryParams(yyjson_mut_doc *doc, std::string_view query, std::string_view separator,
-                                                UrlToolsLocalState &local_state) {
-	auto query_params = yyjson_mut_obj(doc);
-	if (!query_params) {
-		throw InternalException("url_tools: failed to allocate query_params object");
+// Collects the decoded pairs of a raw (undecoded, no leading '?') query string into local_state.
+// The collected views point into `params` or local_state.decoded_pairs, so both must outlive
+// every read of the collection — hence `params` is owned by the caller, not by this function.
+static void UrlToolsCollectQueryParams(std::string_view query, std::string_view separator,
+                                       ada::url_search_params &params, UrlToolsLocalState &local_state) {
+	if (query.empty()) {
+		return;
 	}
-	if (!query.empty()) {
-		ada::url_search_params params;
-		if (separator == "&") {
-			params.reset(query);
-			local_state.query_params.reserve(params.size());
-			for (const auto &entry : params) {
-				UrlToolsPutQueryParam(local_state, entry.first, entry.second);
-			}
-		} else {
-			UrlToolsCollectCustomSeparated(query, separator, local_state);
+	if (separator == "&") {
+		params.reset(query);
+		local_state.query_params.reserve(params.size());
+		for (const auto &entry : params) {
+			UrlToolsPutQueryParam(local_state, entry.first, entry.second);
 		}
-		for (const auto &entry : local_state.query_params) {
-			auto key_value = UrlToolsCopiedString(doc, entry.key);
-			auto string_value = UrlToolsCopiedString(doc, entry.value);
-			if (!yyjson_mut_obj_add(query_params, key_value, string_value)) {
-				throw InternalException("url_tools: failed to add query parameter");
-			}
-		}
-		// The views above (in query_params and in the index map's keys) point into
-		// params/decoded_pairs, so local state must not retain them across rows.
-		local_state.query_params.clear();
-		local_state.query_param_index.clear();
-		local_state.decoded_pairs.clear();
+	} else {
+		UrlToolsCollectCustomSeparated(query, separator, local_state);
 	}
-	return query_params;
 }
 
-static string_t UrlToolsWriteQueryParams(Vector &result, std::string_view query, std::string_view separator,
-                                         UrlToolsLocalState &local_state) {
-	local_state.json_allocator->Reset();
-	auto alc = local_state.json_allocator->GetYYAlc();
-	auto out_doc = yyjson_mut_doc_ptr(yyjson_mut_doc_new(alc));
-	if (!out_doc) {
-		throw InternalException("url_tools: failed to allocate output document");
+// A MAP vector is physically LIST(STRUCT(key, value)): entries are appended to the list child and
+// each row stamps its own (offset, length). ListVector::Reserve grows the child geometrically, so
+// a chunk pays a handful of reallocations rather than one per row — but a grow moves the buffer,
+// so the child data pointers are re-read after every reserve.
+struct UrlToolsMapWriter {
+	UrlToolsMapWriter(Vector &map_vec, QueryValuesMode mode)
+	    : map_vec(map_vec), keys_vec(MapVector::GetKeys(map_vec)), values_vec(MapVector::GetValues(map_vec)),
+	      mode(mode) {
 	}
-	yyjson_mut_doc_set_root(out_doc.get(), UrlToolsBuildQueryParams(out_doc.get(), query, separator, local_state));
-	size_t output_length = 0;
-	auto output_cstr = yyjson_mut_write_opts(out_doc.get(), JSONCommon::WRITE_FLAG, nullptr, &output_length, nullptr);
-	if (!output_cstr) {
-		throw InternalException("url_tools: failed to serialize query_params");
+
+	void WriteRow(idx_t row, UrlToolsLocalState &local_state) {
+		auto &params = local_state.query_params;
+		ListVector::Reserve(map_vec, entry_count + params.size());
+		if (mode == QueryValuesMode::ALL) {
+			ListVector::Reserve(values_vec, value_count + local_state.query_values.size());
+		}
+		auto offset = entry_count;
+		auto keys = FlatVector::GetData<string_t>(keys_vec);
+		if (mode == QueryValuesMode::ALL) {
+			auto value_lists = FlatVector::GetData<list_entry_t>(values_vec);
+			auto &value_child = ListVector::GetEntry(values_vec);
+			auto value_strings = FlatVector::GetData<string_t>(value_child);
+			for (const auto &param : params) {
+				keys[entry_count] = UrlToolsAddString(keys_vec, param.key);
+				value_lists[entry_count] = list_entry_t(value_count, param.count);
+				for (auto value = param.first_value; value != DConstants::INVALID_INDEX;) {
+					value_strings[value_count] = UrlToolsAddString(value_child, local_state.query_values[value].value);
+					value_count++;
+					value = local_state.query_values[value].next;
+				}
+				entry_count++;
+			}
+		} else {
+			auto values = FlatVector::GetData<string_t>(values_vec);
+			for (const auto &param : params) {
+				keys[entry_count] = UrlToolsAddString(keys_vec, param.key);
+				auto value = mode == QueryValuesMode::FIRST ? param.first_value : param.last_value;
+				values[entry_count] = UrlToolsAddString(values_vec, local_state.query_values[value].value);
+				entry_count++;
+			}
+		}
+		FlatVector::GetData<list_entry_t>(map_vec)[row] = list_entry_t(offset, params.size());
 	}
-	std::unique_ptr<char, decltype(&free)> output_handle(output_cstr, free);
-	return StringVector::AddString(result, output_cstr, output_length);
+
+	// A NULL map still carries a list entry; point it at an empty range so nothing reads past the
+	// child's size.
+	void WriteNullRow(idx_t row) {
+		FlatVector::SetNull(map_vec, row, true);
+		FlatVector::GetData<list_entry_t>(map_vec)[row] = list_entry_t(entry_count, 0);
+	}
+
+	void Finish() {
+		ListVector::SetListSize(map_vec, entry_count);
+		if (mode == QueryValuesMode::ALL) {
+			ListVector::SetListSize(values_vec, value_count);
+		}
+	}
+
+	Vector &map_vec;
+	Vector &keys_vec;
+	Vector &values_vec;
+	QueryValuesMode mode;
+	idx_t entry_count = 0;
+	idx_t value_count = 0;
+};
+
+// Collects `query` and writes it as one map row. `params` owns the decoded strings the collected
+// views point at, so the collect and the write must share one scope.
+static void UrlToolsWriteQueryParamsMap(UrlToolsMapWriter &writer, idx_t row, std::string_view query,
+                                        std::string_view separator, UrlToolsLocalState &local_state) {
+	ada::url_search_params params;
+	UrlToolsCollectQueryParams(query, separator, params, local_state);
+	writer.WriteRow(row, local_state);
+	UrlToolsClearQueryParams(local_state);
 }
 
 // Shared URL-input handling: absolute URLs of any scheme parse as-is; a single
@@ -245,42 +330,274 @@ static UrlToolsParsedInput UrlToolsParseInput(std::string_view raw, UrlToolsLoca
 	return {ada::parse<ada::url_aggregator>(raw), false};
 }
 
-// url_components(varchar) -> STRUCT(scheme, hostname, path, query_params JSON, fragment).
-// Total over arbitrary input: unparseable values yield a NULL row instead of an
-// error, so one junk value cannot fail a whole scan.
-inline void UrlComponentsScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
+static LogicalType QueryParamsMapType(QueryValuesMode mode) {
+	auto value_type = mode == QueryValuesMode::ALL ? LogicalType::LIST(LogicalType::VARCHAR) : LogicalType::VARCHAR;
+	return LogicalType::MAP(LogicalType::VARCHAR, value_type);
+}
+
+// The query_values axis selects the shape of the query field: 'raw' hands back the undecoded query
+// string and collects nothing, the parsed modes hand back a MAP whose value type is what the mode
+// promises.
+static LogicalType UrlComponentsType(QueryValuesMode mode) {
+	child_list_t<LogicalType> children {{"scheme", LogicalType::VARCHAR},
+	                                    {"host", LogicalType::VARCHAR},
+	                                    {"port", LogicalType::USMALLINT},
+	                                    {"path", LogicalType::VARCHAR}};
+	if (mode == QueryValuesMode::RAW) {
+		children.push_back({"query", LogicalType::VARCHAR});
+	} else {
+		children.push_back({"query_params", QueryParamsMapType(mode)});
+	}
+	children.push_back({"fragment", LogicalType::VARCHAR});
+	return LogicalType::STRUCT(children);
+}
+
+static string ValuesAxisModeList(const ValuesAxis &axis) {
+	vector<string> names;
+	for (idx_t index = 0; index < axis.mode_count; index++) {
+		names.push_back(StringUtil::Format("'%s'", axis.modes[index].name));
+	}
+	return StringUtil::Join(names, ", ");
+}
+
+// A named call arrives at bind as an ordinary positional argument carrying an alias, so the alias
+// is the only thing that can tell two same-typed optionals apart:
+// query_params_from_string(qs, values := 'all') names the second optional without supplying the
+// first, while query_params_from_string(qs, '|') is still a separator. Returns, per parameter, the
+// index of the argument filling it (INVALID_INDEX when the caller left it out).
+//
+// An alias does not by itself mean the caller wrote a name: a column reference reaches bind
+// carrying its column name, and a column is a legitimate positional separator. Only a foldable
+// argument could have been named, which is why an unrecognized alias is a caller bug exactly there.
+// An unresolved placeholder is neither — it cannot be classified until it has a value, so the bind
+// is deferred to execution time.
+static vector<idx_t> BindNamedArguments(const char *function_name, const vector<unique_ptr<Expression>> &arguments,
+                                        idx_t first_optional, const vector<string> &names) {
+	vector<idx_t> filled_by(names.size(), DConstants::INVALID_INDEX);
+	for (idx_t argument_index = first_optional; argument_index < arguments.size(); argument_index++) {
+		auto &argument = *arguments[argument_index];
+		auto &alias = argument.GetAlias();
+		auto named = std::find(names.begin(), names.end(), alias);
+		if (named == names.end() && !alias.empty()) {
+			if (argument.HasParameter()) {
+				throw ParameterNotResolvedException();
+			}
+			if (argument.IsFoldable()) {
+				throw BinderException("%s: Unknown argument '%s'", function_name, alias);
+			}
+		}
+		auto parameter =
+		    named != names.end() ? static_cast<idx_t>(named - names.begin()) : argument_index - first_optional;
+		if (filled_by[parameter] != DConstants::INVALID_INDEX) {
+			throw BinderException("%s: argument '%s' specified more than once", function_name, names[parameter]);
+		}
+		filled_by[parameter] = argument_index;
+	}
+	return filled_by;
+}
+
+// The axis selects the result type, so it has to be resolved by the binder: a column reference, a
+// NULL, or a name we do not know cannot yield a type and is a caller bug.
+static string BindValuesAxisName(ClientContext &context, Expression &argument, const ValuesAxis &axis) {
+	if (argument.HasParameter()) {
+		throw ParameterNotResolvedException();
+	}
+	if (!argument.IsFoldable()) {
+		throw BinderException("%s: %s must be a constant, one of %s", axis.function_name, axis.parameter_name,
+		                      ValuesAxisModeList(axis));
+	}
+	auto mode_value = ExpressionExecutor::EvaluateScalar(context, argument);
+	if (mode_value.IsNull()) {
+		throw BinderException("%s: %s must not be NULL, expected one of %s", axis.function_name, axis.parameter_name,
+		                      ValuesAxisModeList(axis));
+	}
+	return StringValue::Get(mode_value);
+}
+
+static QueryValuesMode LookupQueryValuesMode(const string &name, const ValuesAxis &axis) {
+	for (idx_t index = 0; index < axis.mode_count; index++) {
+		if (name == axis.modes[index].name) {
+			return axis.modes[index].mode;
+		}
+	}
+	throw BinderException("%s: unknown %s '%s', expected one of %s", axis.function_name, axis.parameter_name, name,
+	                      ValuesAxisModeList(axis));
+}
+
+static QueryValuesMode BindQueryValuesMode(ClientContext &context, Expression &argument, const ValuesAxis &axis) {
+	return LookupQueryValuesMode(BindValuesAxisName(context, argument, axis), axis);
+}
+
+struct QueryValuesBindData : public FunctionData {
+	explicit QueryValuesBindData(QueryValuesMode mode) : mode(mode) {
+	}
+
+	QueryValuesMode mode;
+
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<QueryValuesBindData>(mode);
+	}
+	bool Equals(const FunctionData &other) const override {
+		return mode == other.Cast<QueryValuesBindData>().mode;
+	}
+};
+
+static QueryValuesMode BindOptionalMode(ClientContext &context, const vector<unique_ptr<Expression>> &arguments,
+                                        idx_t argument_index, const ValuesAxis &axis, QueryValuesMode fallback) {
+	if (argument_index == DConstants::INVALID_INDEX) {
+		return fallback;
+	}
+	return BindQueryValuesMode(context, *arguments[argument_index], axis);
+}
+
+// The one-argument spelling is the 'raw' mode, bound through the same path so the two are
+// observationally identical. The mode is re-derived from the argument on every bind — including
+// the re-bind of a deserialized plan — so the bind data needs no serialization callbacks of its own.
+static unique_ptr<FunctionData> UrlComponentsBind(ClientContext &context, ScalarFunction &bound_function,
+                                                  vector<unique_ptr<Expression>> &arguments) {
+	auto filled_by = BindNamedArguments("url_components", arguments, 1, {"query_values"});
+	auto mode = BindOptionalMode(context, arguments, filled_by[0], URL_COMPONENTS_AXIS, QueryValuesMode::RAW);
+	bound_function.SetReturnType(UrlComponentsType(mode));
+	return make_uniq<QueryValuesBindData>(mode);
+}
+
+static unique_ptr<FunctionData> QueryParamsBind(ClientContext &context, ScalarFunction &bound_function,
+                                                vector<unique_ptr<Expression>> &arguments) {
+	auto filled_by = BindNamedArguments("query_params", arguments, 1, {"query_values"});
+	auto mode = BindOptionalMode(context, arguments, filled_by[0], QUERY_PARAMS_AXIS, QueryValuesMode::ALL);
+	bound_function.SetReturnType(QueryParamsMapType(mode));
+	return make_uniq<QueryValuesBindData>(mode);
+}
+
+// Which argument carries the separator is decided by the aliases, and aliases are the one thing a
+// re-bind may not see: query_params_from_string(qs, values := 'all') and
+// query_params_from_string(qs, '|') are the same two constants once the names are gone. So the
+// resolution travels with the plan instead of being guessed again from it.
+struct QueryParamsFromStringBindData : public FunctionData {
+	QueryParamsFromStringBindData(QueryValuesMode mode, idx_t separator_index)
+	    : mode(mode), separator_index(separator_index) {
+	}
+
+	QueryValuesMode mode;
+	idx_t separator_index;
+
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<QueryParamsFromStringBindData>(mode, separator_index);
+	}
+	bool Equals(const FunctionData &other) const override {
+		auto &other_data = other.Cast<QueryParamsFromStringBindData>();
+		return mode == other_data.mode && separator_index == other_data.separator_index;
+	}
+};
+
+static unique_ptr<FunctionData> QueryParamsFromStringBind(ClientContext &context, ScalarFunction &bound_function,
+                                                          vector<unique_ptr<Expression>> &arguments) {
+	auto filled_by = BindNamedArguments("query_params_from_string", arguments, 1, {"sep", "query_values"});
+	auto mode = BindOptionalMode(context, arguments, filled_by[1], QUERY_PARAMS_FROM_STRING_AXIS, QueryValuesMode::ALL);
+	bound_function.SetReturnType(QueryParamsMapType(mode));
+	return make_uniq<QueryParamsFromStringBindData>(mode, filled_by[0]);
+}
+
+static void QueryParamsFromStringSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data,
+                                           const ScalarFunction &) {
+	auto &data = bind_data->Cast<QueryParamsFromStringBindData>();
+	serializer.WriteProperty<uint8_t>(100, "mode", static_cast<uint8_t>(data.mode));
+	serializer.WriteProperty<idx_t>(101, "separator_index", data.separator_index);
+}
+
+static unique_ptr<FunctionData> QueryParamsFromStringDeserialize(Deserializer &deserializer, ScalarFunction &) {
+	auto mode = static_cast<QueryValuesMode>(deserializer.ReadProperty<uint8_t>(100, "mode"));
+	auto separator_index = deserializer.ReadProperty<idx_t>(101, "separator_index");
+	return make_uniq<QueryParamsFromStringBindData>(mode, separator_index);
+}
+
+static unique_ptr<FunctionData> QueryParamBind(ClientContext &context, ScalarFunction &,
+                                               vector<unique_ptr<Expression>> &arguments) {
+	auto filled_by = BindNamedArguments("query_param", arguments, 2, {"query_values"});
+	if (filled_by[0] == DConstants::INVALID_INDEX) {
+		return make_uniq<QueryValuesBindData>(QueryValuesMode::LAST);
+	}
+	auto name = BindValuesAxisName(context, *arguments[filled_by[0]], QUERY_PARAM_AXIS);
+	// 'all' is a legal mode on every map-returning function; a scalar result cannot carry a list, so
+	// name the function that hands one back rather than only listing what is allowed here.
+	if (name == "all") {
+		throw BinderException("query_param: query_values 'all' has no scalar result, use query_params(url, 'all')");
+	}
+	return make_uniq<QueryValuesBindData>(LookupQueryValuesMode(name, QUERY_PARAM_AXIS));
+}
+
+static QueryValuesMode BoundQueryValuesMode(ExpressionState &state) {
+	return state.expr.Cast<BoundFunctionExpression>().bind_info->Cast<QueryValuesBindData>().mode;
+}
+
+static UrlToolsLocalState &GetUrlToolsLocalState(ExpressionState &state) {
 	auto state_ptr = ExecuteFunctionState::GetFunctionState(state);
 	D_ASSERT(state_ptr);
-	auto &local_state = state_ptr->Cast<UrlToolsLocalState>();
+	return state_ptr->Cast<UrlToolsLocalState>();
+}
+
+// url_components(varchar [, query_values]) -> STRUCT(scheme, host, port, path,
+// query VARCHAR | query_params MAP, fragment). Total over arbitrary input: unparseable values
+// yield a NULL row instead of an error, so one junk value cannot fail a whole scan.
+inline void UrlComponentsScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &local_state = GetUrlToolsLocalState(state);
+	auto mode = BoundQueryValuesMode(state);
+
+	// An all-constant call is folded by evaluating a single row and reading row 0 of the result,
+	// which the executor requires to be a CONSTANT_VECTOR — a flat answer there is a contract
+	// violation, not a shape it adapts to. UnaryExecutor carried this for us; a hand-written vector
+	// carries it itself: write row 0, then flip the type once the writes are done.
+	auto constant_result = args.AllConstant();
+	auto row_count = constant_result ? 1 : args.size();
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 	auto &children = StructVector::GetEntries(result);
-	D_ASSERT(children.size() == 5);
+	D_ASSERT(children.size() == 6);
 	for (auto &child : children) {
 		child->SetVectorType(VectorType::FLAT_VECTOR);
 	}
 	auto &scheme_vec = *children[0];
-	auto &hostname_vec = *children[1];
-	auto &path_vec = *children[2];
-	auto &query_params_vec = *children[3];
-	auto &fragment_vec = *children[4];
+	auto &host_vec = *children[1];
+	auto &port_vec = *children[2];
+	auto &path_vec = *children[3];
+	auto &query_vec = *children[4];
+	auto &fragment_vec = *children[5];
+
+	std::optional<UrlToolsMapWriter> map_writer;
+	if (mode != QueryValuesMode::RAW) {
+		map_writer.emplace(query_vec, mode);
+	}
 
 	auto set_null_row = [&](idx_t row) {
 		FlatVector::SetNull(result, row, true);
 		for (auto &child : children) {
 			FlatVector::SetNull(*child, row, true);
 		}
+		if (map_writer) {
+			map_writer->WriteNullRow(row);
+		}
 	};
 	auto set_string_field = [](Vector &vec, idx_t row, std::string_view value) {
-		auto data = value.empty() ? "" : value.data();
-		FlatVector::GetData<string_t>(vec)[row] = StringVector::AddString(vec, data, value.size());
+		FlatVector::GetData<string_t>(vec)[row] = UrlToolsAddString(vec, value);
+	};
+	// ada normalizes the port away when it equals the scheme's default (WHATWG), and reports what
+	// is left as an already-validated 16-bit decimal — so the conversion cannot fail.
+	auto set_port_field = [&](idx_t row, const ada::url_aggregator &url) {
+		if (!url.has_port()) {
+			FlatVector::SetNull(port_vec, row, true);
+			return;
+		}
+		auto port = url.get_port();
+		uint16_t value = 0;
+		std::from_chars(port.data(), port.data() + port.size(), value);
+		FlatVector::GetData<uint16_t>(port_vec)[row] = value;
 	};
 
 	UnifiedVectorFormat input_data;
 	args.data[0].ToUnifiedFormat(args.size(), input_data);
 	auto inputs = UnifiedVectorFormat::GetData<string_t>(input_data);
 
-	for (idx_t row = 0; row < args.size(); row++) {
+	for (idx_t row = 0; row < row_count; row++) {
 		auto input_idx = input_data.sel->get_index(row);
 		if (!input_data.validity.RowIsValid(input_idx)) {
 			set_null_row(row);
@@ -301,94 +618,224 @@ inline void UrlComponentsScalarFun(DataChunk &args, ExpressionState &state, Vect
 
 		if (parsed.relative) {
 			FlatVector::SetNull(scheme_vec, row, true);
-			FlatVector::SetNull(hostname_vec, row, true);
+			FlatVector::SetNull(host_vec, row, true);
+			FlatVector::SetNull(port_vec, row, true);
 		} else {
 			set_string_field(scheme_vec, row, StripTrailingChar(std::string_view(url.get_protocol()), ':'));
-			set_string_field(hostname_vec, row, std::string_view(url.get_hostname()));
+			set_string_field(host_vec, row, std::string_view(url.get_hostname()));
+			set_port_field(row, url);
 		}
 		set_string_field(path_vec, row, std::string_view(url.get_pathname()));
 		set_string_field(fragment_vec, row, StripLeadingChar(std::string_view(url.get_hash()), '#'));
 
 		auto query = StripLeadingChar(std::string_view(url.get_search()), '?');
-		FlatVector::GetData<string_t>(query_params_vec)[row] =
-		    UrlToolsWriteQueryParams(query_params_vec, query, "&", local_state);
+		if (map_writer) {
+			UrlToolsWriteQueryParamsMap(*map_writer, row, query, "&", local_state);
+		} else {
+			set_string_field(query_vec, row, query);
+		}
+	}
+
+	if (map_writer) {
+		map_writer->Finish();
+	}
+	if (constant_result) {
+		// A constant STRUCT carries the vector type down to its children; DuckDB verifies it.
+		result.SetVectorType(VectorType::CONSTANT_VECTOR);
+		for (auto &child : children) {
+			child->SetVectorType(VectorType::CONSTANT_VECTOR);
+		}
 	}
 }
 
-// query_params(varchar) -> JSON object of decoded query parameters. Accepts the
-// same inputs as url_components; anything without a parseable query (junk, no query
-// part) yields '{}' so downstream JSON access stays uniform.
+// query_params(varchar [, values]) -> MAP of decoded query parameters. Accepts the same inputs as
+// url_components; anything without a parseable query yields an empty map, so downstream key access
+// stays uniform. NULL input is the one NULL map: it is the absence of a URL, not of parameters.
 inline void QueryParamsScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto state_ptr = ExecuteFunctionState::GetFunctionState(state);
-	D_ASSERT(state_ptr);
-	auto &local_state = state_ptr->Cast<UrlToolsLocalState>();
-	auto &input = args.data[0];
-	UnaryExecutor::Execute<string_t, string_t>(input, result, args.size(), [&](const string_t &url_input) {
-		std::string_view raw(url_input.GetDataUnsafe(), url_input.GetSize());
-		auto parsed = UrlToolsParseInput(raw, local_state);
-		if (!parsed.url) {
-			return UrlToolsWriteQueryParams(result, std::string_view(), "&", local_state);
+	auto &local_state = GetUrlToolsLocalState(state);
+
+	// Constant arguments fold to a constant result — see UrlComponentsScalarFun.
+	auto constant_result = args.AllConstant();
+	auto row_count = constant_result ? 1 : args.size();
+
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	UrlToolsMapWriter writer(result, BoundQueryValuesMode(state));
+
+	UnifiedVectorFormat input_data;
+	args.data[0].ToUnifiedFormat(args.size(), input_data);
+	auto inputs = UnifiedVectorFormat::GetData<string_t>(input_data);
+
+	for (idx_t row = 0; row < row_count; row++) {
+		auto input_idx = input_data.sel->get_index(row);
+		if (!input_data.validity.RowIsValid(input_idx)) {
+			writer.WriteNullRow(row);
+			continue;
 		}
-		auto query = StripLeadingChar(std::string_view(parsed.url->get_search()), '?');
-		return UrlToolsWriteQueryParams(result, query, "&", local_state);
-	});
+		auto &input = inputs[input_idx];
+		auto parsed = UrlToolsParseInput(std::string_view(input.GetDataUnsafe(), input.GetSize()), local_state);
+		auto query =
+		    parsed.url ? StripLeadingChar(std::string_view(parsed.url->get_search()), '?') : std::string_view();
+		UrlToolsWriteQueryParamsMap(writer, row, query, "&", local_state);
+	}
+	writer.Finish();
+	if (constant_result) {
+		result.SetVectorType(VectorType::CONSTANT_VECTOR);
+	}
 }
 
-// query_params_from_string(varchar) -> JSON object from a bare query string
-// (no URL around it); a leading '?' is tolerated.
+// query_params_from_string(varchar [, sep [, values]]) -> MAP from a bare query string (no URL
+// around it); a leading '?' is tolerated. The separator is an ordinary per-row argument — it does
+// not select the result type — and an empty one is a caller bug, loud at runtime.
 inline void QueryParamsFromStringScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto state_ptr = ExecuteFunctionState::GetFunctionState(state);
-	D_ASSERT(state_ptr);
-	auto &local_state = state_ptr->Cast<UrlToolsLocalState>();
-	auto &input = args.data[0];
-	UnaryExecutor::Execute<string_t, string_t>(input, result, args.size(), [&](const string_t &query_input) {
-		auto query = StripLeadingChar(std::string_view(query_input.GetDataUnsafe(), query_input.GetSize()), '?');
-		return UrlToolsWriteQueryParams(result, query, "&", local_state);
-	});
+	auto &local_state = GetUrlToolsLocalState(state);
+	auto &bind_data = state.expr.Cast<BoundFunctionExpression>().bind_info->Cast<QueryParamsFromStringBindData>();
+
+	// Constant arguments fold to a constant result — see UrlComponentsScalarFun.
+	auto constant_result = args.AllConstant();
+	auto row_count = constant_result ? 1 : args.size();
+
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	UrlToolsMapWriter writer(result, bind_data.mode);
+
+	UnifiedVectorFormat input_data;
+	args.data[0].ToUnifiedFormat(args.size(), input_data);
+	auto inputs = UnifiedVectorFormat::GetData<string_t>(input_data);
+
+	UnifiedVectorFormat separator_data;
+	if (bind_data.separator_index != DConstants::INVALID_INDEX) {
+		args.data[bind_data.separator_index].ToUnifiedFormat(args.size(), separator_data);
+	}
+
+	for (idx_t row = 0; row < row_count; row++) {
+		auto input_idx = input_data.sel->get_index(row);
+		if (!input_data.validity.RowIsValid(input_idx)) {
+			writer.WriteNullRow(row);
+			continue;
+		}
+		std::string_view separator("&");
+		if (bind_data.separator_index != DConstants::INVALID_INDEX) {
+			auto separator_idx = separator_data.sel->get_index(row);
+			if (!separator_data.validity.RowIsValid(separator_idx)) {
+				writer.WriteNullRow(row);
+				continue;
+			}
+			auto &separator_input = UnifiedVectorFormat::GetData<string_t>(separator_data)[separator_idx];
+			separator = std::string_view(separator_input.GetDataUnsafe(), separator_input.GetSize());
+			if (separator.empty()) {
+				throw InvalidInputException("query_params_from_string: separator must not be empty");
+			}
+		}
+		auto &input = inputs[input_idx];
+		auto query = StripLeadingChar(std::string_view(input.GetDataUnsafe(), input.GetSize()), '?');
+		UrlToolsWriteQueryParamsMap(writer, row, query, separator, local_state);
+	}
+	writer.Finish();
+	if (constant_result) {
+		result.SetVectorType(VectorType::CONSTANT_VECTOR);
+	}
 }
 
-// query_params_from_string(varchar, varchar) -> same, with a custom pair separator.
-inline void QueryParamsFromStringSeparatorScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto state_ptr = ExecuteFunctionState::GetFunctionState(state);
-	D_ASSERT(state_ptr);
-	auto &local_state = state_ptr->Cast<UrlToolsLocalState>();
-	BinaryExecutor::Execute<string_t, string_t, string_t>(
+// query_param(varchar, varchar [, values]) -> the decoded value of one key. It stops at that value:
+// no map is built and no per-key collection happens, which is the whole reason to reach for it
+// instead of query_params(url)[key]. An absent key is NULL; a present key with an empty value is ''.
+inline void QueryParamScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &local_state = GetUrlToolsLocalState(state);
+	auto mode = BoundQueryValuesMode(state);
+
+	BinaryExecutor::ExecuteWithNulls<string_t, string_t, string_t>(
 	    args.data[0], args.data[1], result, args.size(),
-	    [&](const string_t &query_input, const string_t &separator_input) {
-		    std::string_view separator(separator_input.GetDataUnsafe(), separator_input.GetSize());
-		    if (separator.empty()) {
-			    throw InvalidInputException("query_params_from_string: separator must not be empty");
+	    [&](const string_t &url_input, const string_t &key_input, ValidityMask &mask, idx_t row) {
+		    auto parsed =
+		        UrlToolsParseInput(std::string_view(url_input.GetDataUnsafe(), url_input.GetSize()), local_state);
+		    if (!parsed.url) {
+			    mask.SetInvalid(row);
+			    return string_t();
 		    }
-		    auto query = StripLeadingChar(std::string_view(query_input.GetDataUnsafe(), query_input.GetSize()), '?');
-		    return UrlToolsWriteQueryParams(result, query, separator, local_state);
+		    ada::url_search_params params;
+		    params.reset(StripLeadingChar(std::string_view(parsed.url->get_search()), '?'));
+
+		    // The map's keys are the sanitized ones, so the comparison has to run against those too
+		    // — otherwise a key with ill-formed bytes would be unreachable through this function.
+		    local_state.sanitized.clear();
+		    std::string_view key(key_input.GetDataUnsafe(), key_input.GetSize());
+		    std::optional<std::string_view> found;
+		    for (const auto &entry : params) {
+			    if (UrlToolsWellFormed(local_state, entry.first) != key) {
+				    continue;
+			    }
+			    found = entry.second;
+			    if (mode == QueryValuesMode::FIRST) {
+				    break;
+			    }
+		    }
+		    if (!found) {
+			    mask.SetInvalid(row);
+			    return string_t();
+		    }
+		    return UrlToolsAddString(result, UrlToolsWellFormed(local_state, *found));
 	    });
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
-	child_list_t<LogicalType> url_components_children {{"scheme", LogicalType::VARCHAR},
-	                                                   {"hostname", LogicalType::VARCHAR},
-	                                                   {"path", LogicalType::VARCHAR},
-	                                                   {"query_params", LogicalType::JSON()},
-	                                                   {"fragment", LogicalType::VARCHAR}};
-	auto url_components_function =
-	    ScalarFunction("url_components", {LogicalType::VARCHAR}, LogicalType::STRUCT(url_components_children),
-	                   UrlComponentsScalarFun, nullptr, nullptr, nullptr, UrlToolsInitLocalState);
-	url_components_function.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	loader.RegisterFunction(url_components_function);
+	// The result type comes from the bind function, so ANY is the registration-time placeholder
+	// (the struct_extract precedent), and the NULL rows are written by the function itself. Every
+	// arity shares one bind and one execute: the shorter spellings are the defaults of the longer
+	// ones, not separate behavior.
+	auto bind_typed_function = [](vector<LogicalType> arguments, scalar_function_t function,
+	                              bind_scalar_function_t bind) {
+		ScalarFunction typed_function(std::move(arguments), LogicalType::ANY, std::move(function), bind, nullptr,
+		                              nullptr, UrlToolsInitLocalState);
+		typed_function.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		return typed_function;
+	};
 
-	auto query_params_function =
-	    ScalarFunction("query_params", {LogicalType::VARCHAR}, LogicalType::JSON(), QueryParamsScalarFun, nullptr,
-	                   nullptr, nullptr, UrlToolsInitLocalState);
-	loader.RegisterFunction(query_params_function);
+	ScalarFunctionSet url_components_set("url_components");
+	url_components_set.AddFunction(
+	    bind_typed_function({LogicalType::VARCHAR}, UrlComponentsScalarFun, UrlComponentsBind));
+	url_components_set.AddFunction(
+	    bind_typed_function({LogicalType::VARCHAR, LogicalType::VARCHAR}, UrlComponentsScalarFun, UrlComponentsBind));
+	loader.RegisterFunction(url_components_set);
 
+	ScalarFunctionSet query_params_set("query_params");
+	query_params_set.AddFunction(bind_typed_function({LogicalType::VARCHAR}, QueryParamsScalarFun, QueryParamsBind));
+	query_params_set.AddFunction(
+	    bind_typed_function({LogicalType::VARCHAR, LogicalType::VARCHAR}, QueryParamsScalarFun, QueryParamsBind));
+	loader.RegisterFunction(query_params_set);
+
+	// Two same-typed optionals: which argument is the separator is bind data, and bind data that a
+	// re-bind cannot re-derive has to be serialized with the plan.
+	auto query_params_from_string_function = [&](vector<LogicalType> arguments) {
+		auto function =
+		    bind_typed_function(std::move(arguments), QueryParamsFromStringScalarFun, QueryParamsFromStringBind);
+		function.SetSerializeCallback(QueryParamsFromStringSerialize);
+		function.SetDeserializeCallback(QueryParamsFromStringDeserialize);
+		return function;
+	};
 	ScalarFunctionSet query_params_from_string_set("query_params_from_string");
-	query_params_from_string_set.AddFunction(ScalarFunction({LogicalType::VARCHAR}, LogicalType::JSON(),
-	                                                        QueryParamsFromStringScalarFun, nullptr, nullptr, nullptr,
-	                                                        UrlToolsInitLocalState));
+	query_params_from_string_set.AddFunction(query_params_from_string_function({LogicalType::VARCHAR}));
 	query_params_from_string_set.AddFunction(
-	    ScalarFunction({LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::JSON(),
-	                   QueryParamsFromStringSeparatorScalarFun, nullptr, nullptr, nullptr, UrlToolsInitLocalState));
+	    query_params_from_string_function({LogicalType::VARCHAR, LogicalType::VARCHAR}));
+	query_params_from_string_set.AddFunction(
+	    query_params_from_string_function({LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
 	loader.RegisterFunction(query_params_from_string_set);
+
+	// The scalar result type never varies, but the axis still has to be resolved at bind time: 'all'
+	// has no scalar answer, and that is a caller bug worth reporting before the scan. It also has to
+	// see a NULL axis, which is why NULL handling is the function's own: under DEFAULT handling the
+	// binder folds a call with any constant-NULL argument straight to NULL, and query_values := NULL
+	// would quietly answer NULL instead of failing. NULL url/key rows still yield NULL — the
+	// executor's own NULL handling, not the binder's.
+	auto query_param_function = [](vector<LogicalType> arguments) {
+		ScalarFunction function(std::move(arguments), LogicalType::VARCHAR, QueryParamScalarFun, QueryParamBind,
+		                        nullptr, nullptr, UrlToolsInitLocalState);
+		function.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		return function;
+	};
+	ScalarFunctionSet query_param_set("query_param");
+	query_param_set.AddFunction(query_param_function({LogicalType::VARCHAR, LogicalType::VARCHAR}));
+	query_param_set.AddFunction(
+	    query_param_function({LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
+	loader.RegisterFunction(query_param_set);
 }
 
 } // namespace

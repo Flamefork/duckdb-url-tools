@@ -1,6 +1,7 @@
 from json import loads as json_loads
 from os import environ
 from pathlib import Path
+from re import compile as re_compile
 from select import select
 from subprocess import PIPE
 from subprocess import Popen
@@ -29,6 +30,9 @@ SENTINEL_TOKEN = "URL_TOOLS_PROPERTY_SENTINEL_7c1d"
 SENTINEL_LINE = f'[{{"url_tools_sentinel":"{SENTINEL_TOKEN}"}}]'
 
 MAX_EXAMPLES = int(environ.get("URL_TOOLS_PROPERTY_MAX_EXAMPLES", "300"))
+
+# Split on (and keep) the bytes the CLI's line reader may swallow — see sql_literal.
+CONTROL_BYTE = re_compile(r"([\x00-\x1f\x7f])")
 
 # Ceiling on how long one statement may go without producing output. A property query runs in
 # milliseconds, so this only fires on a genuine stall: a CLI that treats the sent SQL as an
@@ -166,14 +170,19 @@ class UrlToolsSession:
 
 def sql_literal(text: str) -> str:
     # A SQL expression evaluating to exactly `text`. The persistent CLI reads stdin as
-    # newline-delimited C-strings (local_getline), so a raw NUL byte on the wire terminates the
-    # line early and the statement is never seen as complete — the pipe round-trip then deadlocks
-    # (a bare newline is harmless: the shell reassembles the statement across lines). Splice NUL
-    # back in with chr(0) so the wire carries no raw NUL while the value is preserved.
-    if "\x00" not in text:
-        return "'" + text.replace("'", "''") + "'"
-    runs = ["'" + run.replace("'", "''") + "'" for run in text.split("\x00")]
-    return "(" + " || chr(0) || ".join(runs) + ")"
+    # newline-delimited C-strings (local_getline), so a control byte travelling raw on the wire is
+    # at the mercy of the line reader before the statement is ever assembled: a NUL terminates the
+    # line early (the statement never completes and the pipe round-trip deadlocks), and a 0x03
+    # opening a continuation line makes the shell drop the whole statement (it answers with no row
+    # and no error, which reads exactly like a SQL failure). Neither is url_tools behavior. So keep
+    # control bytes off the wire entirely and splice them back with chr(), which the parser applies
+    # to the value while the transport only ever sees printable text.
+    pieces = [
+        f"chr({ord(chunk)})" if index % 2 else "'" + chunk.replace("'", "''") + "'"
+        for index, chunk in enumerate(CONTROL_BYTE.split(text))
+        if chunk
+    ]
+    return "(" + " || ".join(pieces) + ")" if pieces else "''"
 
 
 SESSION = UrlToolsSession(
@@ -215,44 +224,157 @@ url_inputs = st.builds(
 )
 
 
-# Totality: url_components never raises, whatever the input — junk parses to a
-# NULL row, never to a scan-killing error.
+QUERY_VALUES_MODES = ("raw", "first", "last", "all")
+PARSED_QUERY_VALUES_MODES = ("first", "last", "all")
+
+
+# Totality: url_components never raises in any mode, whatever the input — junk parses
+# to a NULL row, never to a scan-killing error.
 @PROPERTY_SETTINGS
-@example(url="https://example.com/path?utm_source=duckdb#top")
-@example(url="/search?q=%D0%BB&tab=products")
-@example(url="//host/protocol-relative")
-@example(url="http://[::1]:80/?k=%FF%FE")
-@given(url=url_inputs)
-def test_url_components_total(url: str) -> None:
-    result = SESSION.read(f"url_components({sql_literal(url)})")
+@example(url="https://example.com/path?utm_source=duckdb#top", mode="raw")
+@example(url="/search?q=%D0%BB&tab=products", mode="all")
+@example(url="//host/protocol-relative", mode="first")
+@example(url="http://[::1]:80/?k=%FF%FE", mode="last")
+@given(url=url_inputs, mode=st.sampled_from(QUERY_VALUES_MODES))
+def test_url_components_total(url: str, mode: str) -> None:
+    result = SESSION.read(f"url_components({sql_literal(url)}, '{mode}')")
     assert not isinstance(result, UrlToolsSession.Errored), f"url_components errored: {result.message}"
 
 
-# query_params is total, always a JSON object, and agrees with the query_params
-# field of url_components: same parse, same object — and unparseable input means
-# a NULL components row with query_params collapsing to {}.
+# Read one param map as a Python object. The MAP is cast to JSON because that is the one spelling
+# the harness can parse back losslessly; the cast itself is pinned by law 7 below.
+def read_params(expr: str) -> Any:
+    text = SESSION.read(f"CAST(({expr}) AS JSON)")
+    assert not isinstance(text, UrlToolsSession.Errored), f"{expr} errored: {text.message}"
+    return None if text is None else json_loads(text)
+
+
+# Mode key-invariance (law 2): the values axis changes values only. The key set and its
+# first-occurrence order are the same in every parsed mode, every key carries at least one
+# value under 'all', and 'first'/'last' are the ends of that list. Checked on both spellings of
+# the same collection — the standalone function and the struct field — which also pins that the
+# two never drift apart.
+@PROPERTY_SETTINGS
+@example(url="https://example.com/?a=1&a=2&b=%2B")
+@example(url="https://example.com/?a=&a=&a=")
+@example(url="/search?q=%D0%BB&tab=products")
+@given(url=url_inputs)
+def test_query_values_modes_agree(url: str) -> None:
+    literal = sql_literal(url)
+    maps: dict[str, Any] = {}
+    for mode in PARSED_QUERY_VALUES_MODES:
+        maps[mode] = read_params(f"query_params({literal}, '{mode}')")
+        assert maps[mode] is not None, f"query_params({mode!r}) returned NULL for a non-NULL input"
+        field = read_params(f"(url_components({literal}, '{mode}')).query_params")
+        # An unparseable URL has no component row at all; it still has an (empty) parameter map.
+        agrees = field == maps[mode] if field is not None else maps[mode] == {}
+        assert agrees, f"query_params({mode!r}) is {maps[mode]!r}, the struct field is {field!r}"
+    assert list(maps["first"]) == list(maps["all"]), f"'first' keys differ from 'all': {maps!r}"
+    assert list(maps["last"]) == list(maps["all"]), f"'last' keys differ from 'all': {maps!r}"
+    for key, values in maps["all"].items():
+        assert values, f"key {key!r} carries no values: {maps!r}"
+        assert maps["first"][key] == values[0], f"'first' is not the head of 'all' for {key!r}: {maps!r}"
+        assert maps["last"][key] == values[-1], f"'last' is not the tail of 'all' for {key!r}: {maps!r}"
+
+
+# Point/object agreement (law 3): query_param(u, k, m) is exactly query_params(u, m)[k] — for every
+# key the URL carries (empty values included) and for a key it does not carry, where both are NULL.
+@PROPERTY_SETTINGS
+@example(url="https://example.com/?a=1&a=2&b=")
+@example(url="https://example.com/?%FF=1")
+@example(url="/p?flag&x=1")
+@given(url=url_inputs)
+def test_query_param_agrees_with_the_map(url: str) -> None:
+    literal = sql_literal(url)
+    for mode in ("first", "last"):
+        entries = read_params(f"query_params({literal}, '{mode}')")
+        for key in list(entries) + ["url_tools_absent_key"]:
+            point = SESSION.read(f"query_param({literal}, {sql_literal(key)}, '{mode}')")
+            assert not isinstance(point, UrlToolsSession.Errored), f"query_param errored: {point.message}"
+            expected = entries[key] if key in entries else None
+            assert point == expected, f"query_param({key!r}, {mode!r}) is {point!r}, the map says {expected!r}"
+
+
+# Key uniqueness is our invariant, not DuckDB's: a hand-written map vector is not validated in
+# release builds, so only the collector's dedup stands behind it. Checked on map_keys, not on the
+# JSON form — a JSON parser would silently collapse a duplicate key and hide the defect.
+@PROPERTY_SETTINGS
+@example(url="https://example.com/?a=1&a=2&a=3", mode="all")
+@example(url="https://example.com/?%FF=1&%FE=2", mode="last")
+@given(url=url_inputs, mode=st.sampled_from(PARSED_QUERY_VALUES_MODES))
+def test_map_keys_are_unique(url: str, mode: str) -> None:
+    keys_text = SESSION.read(f"CAST(map_keys((url_components({sql_literal(url)}, '{mode}')).query_params) AS JSON)")
+    assert not isinstance(keys_text, UrlToolsSession.Errored), f"map_keys errored: {keys_text.message}"
+    if keys_text is None:
+        return
+    keys = json_loads(keys_text)
+    assert len(keys) == len(set(keys)), f"duplicate keys in the map: {keys!r}"
+
+
+# v1's JSON, spelled out: compact separators, keys in first-occurrence order, non-ASCII raw, '"' and
+# backslash escaped, and the C0 controls escaped with their short form where they have one and
+# \uXXXX — UPPERCASE hex — otherwise. That hex case is why the oracle is written out instead of
+# borrowed from Python's json, which spells the very same escape in lowercase and would fail a byte
+# comparison for a reason of its own.
+JSON_SHORT_ESCAPES = {'"': '\\"', "\\": "\\\\", "\b": "\\b", "\f": "\\f", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+def v1_json_string(text: str) -> str:
+    escaped = []
+    for char in text:
+        if char in JSON_SHORT_ESCAPES:
+            escaped.append(JSON_SHORT_ESCAPES[char])
+        elif char < " ":
+            escaped.append(f"\\u{ord(char):04X}")
+        else:
+            escaped.append(char)
+    return '"' + "".join(escaped) + '"'
+
+
+def v1_json_object(entries: dict[str, str]) -> str:
+    return "{" + ",".join(f"{v1_json_string(key)}:{v1_json_string(value)}" for key, value in entries.items()) + "}"
+
+
+# v1 compatibility anchor (law 7): CAST(query_params(u, 'last') AS JSON) is byte-for-byte what v1's
+# JSON-returning query_params wrote. v1's writer left the extension with the JSON return type, so the
+# anchor is held against the independent oracle above. The consumer's migration off the JSON spelling
+# is only verifiable while this holds.
 @PROPERTY_SETTINGS
 @example(url="https://example.com/path?utm_source=duckdb#top")
-@example(url="/search?q=%D0%BB&tab=products")
 @example(url="https://example.com/?a=1&a=2&b=%2B")
+@example(url="https://example.com/?bad=%FF&%FF=x")
+@example(url="https://example.com/?q=%22quoted%22%5C&nl=%0A&tab=%09")
 @given(url=url_inputs)
-def test_query_params_agrees_with_components(url: str) -> None:
+def test_last_map_matches_v1_json(url: str) -> None:
     literal = sql_literal(url)
-    params_text = SESSION.read(f"query_params({literal})")
-    assert not isinstance(params_text, UrlToolsSession.Errored), f"query_params errored: {params_text.message}"
-    assert params_text is not None, "query_params returned NULL for a non-NULL input"
-    params = json_loads(params_text)
-    assert isinstance(params, dict), f"query_params is not a JSON object: {params_text!r}"
-    components_params_text = SESSION.read(f"(url_components({literal})).query_params")
-    assert not isinstance(components_params_text, UrlToolsSession.Errored)
-    if components_params_text is None:
-        assert params == {}, f"components NULL but query_params = {params_text!r}"
+    map_json = SESSION.read(f"CAST(query_params({literal}, 'last') AS JSON)")
+    assert not isinstance(map_json, UrlToolsSession.Errored), f"query_params errored: {map_json.message}"
+    assert map_json is not None, "query_params returned NULL for a non-NULL input"
+    every_value = read_params(f"query_params({literal}, 'all')")
+    v1_json = v1_json_object({key: values[-1] for key, values in every_value.items()})
+    assert map_json == v1_json, f"the MAP as JSON is {map_json!r}, v1 wrote {v1_json!r}"
+
+
+# Raw/parsed agreement (law 5, in the spelling available today): the raw query field is exactly the
+# string the param functions parse — the two spellings of "the query of this URL" cannot drift
+# apart. The url_query(u) accessor lands in a later slice; the struct field is the same value.
+@PROPERTY_SETTINGS
+@example(url="https://example.com/?a=1&a=2&b=%2B")
+@example(url="/search?q=%D0%BB&tab=products")
+@given(url=url_inputs)
+def test_raw_query_reparses_to_the_same_params(url: str) -> None:
+    literal = sql_literal(url)
+    from_raw = read_params(f"query_params_from_string((url_components({literal})).query)")
+    direct = read_params(f"query_params({literal})")
+    if from_raw is None:
+        assert direct == {}, f"NULL components row but query_params = {direct!r}"
     else:
-        assert json_loads(components_params_text) == params
+        assert from_raw == direct, f"the raw query parses to {from_raw!r}, query_params says {direct!r}"
 
 
-# The bare-query-string variant is total and always yields a JSON object, even on
-# junk that never came near a URL (raw percent noise, invalid UTF-8 escapes, NULs).
+# The bare-query-string variant is total and always yields a map, even on junk that never came near
+# a URL (raw percent noise, invalid UTF-8 escapes, NULs). Its default mode is 'all', so every value
+# is a list — a single-valued key included.
 @PROPERTY_SETTINGS
 @example(query="a=%FF")
 @example(query="?a=1")
@@ -260,10 +382,9 @@ def test_query_params_agrees_with_components(url: str) -> None:
 @example(query="=&=&a")
 @given(query=st.one_of(url_flavored_text, st.text(max_size=120)))
 def test_query_params_from_string_total(query: str) -> None:
-    result = SESSION.read(f"query_params_from_string({sql_literal(query)})")
-    assert not isinstance(result, UrlToolsSession.Errored), f"query_params_from_string errored: {result.message}"
-    assert result is not None
-    assert isinstance(json_loads(result), dict)
+    result = read_params(f"query_params_from_string({sql_literal(query)})")
+    assert isinstance(result, dict), f"query_params_from_string yielded {result!r}"
+    assert all(isinstance(values, list) and values for values in result.values()), f"'all' is not lists: {result!r}"
 
 
 # The custom-separator overload accepts any non-empty separator and stays total.
@@ -275,10 +396,8 @@ def test_query_params_from_string_total(query: str) -> None:
     separator=st.text(min_size=1, max_size=3),
 )
 def test_query_params_from_string_separator_total(query: str, separator: str) -> None:
-    result = SESSION.read(f"query_params_from_string({sql_literal(query)}, {sql_literal(separator)})")
-    assert not isinstance(result, UrlToolsSession.Errored), f"custom separator errored: {result.message}"
-    assert result is not None
-    assert isinstance(json_loads(result), dict)
+    result = read_params(f"query_params_from_string({sql_literal(query)}, {sql_literal(separator)})")
+    assert isinstance(result, dict), f"the custom separator yielded {result!r}"
 
 
 # The one documented loud failure: an empty separator is a caller bug and must
@@ -300,15 +419,17 @@ def test_empty_separator_fails_loud(query: str) -> None:
 @given(params=st.dictionaries(st.text(max_size=20), st.text(max_size=20), max_size=8))
 def test_urlencode_round_trip(params: dict[str, str]) -> None:
     encoded = urlencode(params)
-    result = SESSION.read(f"query_params_from_string({sql_literal(encoded)})")
-    assert not isinstance(result, UrlToolsSession.Errored), f"round trip errored: {result.message}"
-    assert result is not None
-    assert json_loads(result) == params, f"urlencode({params!r}) = {encoded!r} decoded to {result!r}"
+    result = read_params(f"query_params_from_string({sql_literal(encoded)}, '&', 'last')")
+    assert result == params, f"urlencode({params!r}) = {encoded!r} decoded to {result!r}"
 
 
 PROPERTIES = [
     test_url_components_total,
-    test_query_params_agrees_with_components,
+    test_query_values_modes_agree,
+    test_query_param_agrees_with_the_map,
+    test_map_keys_are_unique,
+    test_last_map_matches_v1_json,
+    test_raw_query_reparses_to_the_same_params,
     test_query_params_from_string_total,
     test_query_params_from_string_separator_total,
     test_empty_separator_fails_loud,

@@ -38,12 +38,14 @@ TARGETS = {
 # - `native` extracts raw (undecoded) values; url_tools decodes per WHATWG and
 #   netquack's url_decode matches it on %XX and '+'.
 # - On junk input url_tools yields NULL, netquack/native yield ''.
+# - The map operations time the 'last' mode: MAP(VARCHAR, VARCHAR) is the shape
+#   the netquack/native emulations produce, so the comparison stays a comparison.
 OPERATIONS = {
     "host": {
         "input": "urls",
         "column": "url",
         "targets": {
-            "url_tools": "(url_components(url)).hostname",
+            "url_tools": "(url_components(url)).host",
             "netquack": "extract_host(url)",
             "native": "regexp_extract(url, '^[a-zA-Z][a-zA-Z0-9+.-]*://(?:[^/?#@]*@)?([^/?#:]+)', 1)",
         },
@@ -61,7 +63,7 @@ OPERATIONS = {
         "input": "urls",
         "column": "url",
         "targets": {
-            "url_tools": "query_params(url)->>'utm_source'",
+            "url_tools": "query_param(url, 'utm_source')",
             "netquack": "url_decode(regexp_extract(extract_query_string(url), '(?:^|&)utm_source=([^&]*)', 1))",
             "native": "regexp_extract(url, '[?&]utm_source=([^&#]*)', 1)",
         },
@@ -70,7 +72,7 @@ OPERATIONS = {
         "input": "urls",
         "column": "url",
         "targets": {
-            "url_tools": "query_params(url)",
+            "url_tools": "query_params(url, 'last')",
             "netquack": "(SELECT map(list(key), list(value)) FROM extract_query_parameters(_bench_in.url))",
             "native": (
                 "map_from_entries([(split_part(p, '=', 1), split_part(p, '=', 2)) "
@@ -89,7 +91,7 @@ OPERATIONS = {
         "input": "query_strings",
         "column": "qs",
         "targets": {
-            "url_tools": "query_params_from_string(qs)",
+            "url_tools": "query_params_from_string(qs, '&', 'last')",
             "native": (
                 "map_from_entries([(split_part(p, '=', 1), split_part(p, '=', 2)) "
                 "for p in str_split(nullif(qs, ''), '&')])"

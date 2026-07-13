@@ -4,16 +4,20 @@
 
 require url_tools
 
-# Percent-decoding a query param can yield any byte sequence, so the JSON output would not be
-# valid UTF-8 unless the ill-formed bytes are replaced. This file pins that replacement at the
-# byte level (hex of the serialized JSON) rather than by example: it is a characterization table,
-# and every expected value here was recorded from the shipped behavior. Both the value side and
-# the key side go through the same sanitizer, so both are pinned.
+require json
+
+# Percent-decoding a query param can yield any byte sequence, and a DuckDB VARCHAR may not carry
+# ill-formed UTF-8, so the bad bytes are replaced. This file pins that replacement at the byte
+# level rather than by example: it is a characterization table, and every expected value here was
+# recorded from the shipped behavior. The map is read through its JSON cast — the spelling that
+# makes the bytes visible — in the 'last' mode, whose object is v1's byte for byte. Both the value
+# side and the key side go through the same sanitizer, so both are pinned.
 
 # Every byte 0x80..0xFF standing alone is ill-formed and collapses to exactly one U+FFFD
 # (EF BF BD). A single result row means all 128 bytes agree; a future divergence splits the group.
 query IIII
-SELECT hex(query_params_from_string('a=%' || printf('%02X', b))::VARCHAR), count(*), min(b), max(b)
+SELECT hex(CAST(query_params_from_string('a=%' || printf('%02X', b), query_values := 'last') AS JSON)::VARCHAR),
+       count(*), min(b), max(b)
 FROM range(128, 256) t(b)
 GROUP BY 1
 ORDER BY 1;
@@ -71,8 +75,8 @@ WITH cases(id, label, encoded) AS (VALUES
     (43, 'empty', '')
 )
 SELECT label,
-       hex(query_params_from_string('a=' || encoded)::VARCHAR),
-       hex(query_params_from_string(encoded || '=v')::VARCHAR)
+       hex(CAST(query_params_from_string('a=' || encoded, query_values := 'last') AS JSON)::VARCHAR),
+       hex(CAST(query_params_from_string(encoded || '=v', query_values := 'last') AS JSON)::VARCHAR)
 FROM cases
 ORDER BY id;
 ----
@@ -120,10 +124,25 @@ four continuation bytes	7B2261223A22EFBFBDEFBFBDEFBFBDEFBFBD227D	7B22EFBFBDEFBFB
 ASCII only	7B2261223A22706C61696E227D	7B22706C61696E223A2276227D
 empty	7B2261223A22227D	7B22223A2276227D
 
-# The same sanitizer runs behind url_components and query_params, so an ill-formed sequence in a
-# full URL lands identically. The output stays valid UTF-8: the JSON round-trips back to U+FFFD.
-query II
-SELECT hex((url_components('https://example.com/?a=%ED%A0%80')).query_params::VARCHAR),
-       hex(query_params('https://example.com/?a=%ED%A0%80')::VARCHAR);
+# Sanitization runs before dedup, not after: distinct ill-formed keys can repair to the same
+# string, and it is the repaired string that lands in the result — so two such keys are one key.
+# Deduping on the raw bytes would emit a duplicate key, which is undefined for a MAP consumer.
+query IIII
+SELECT query_params_from_string('%FF=1&%FE=2', query_values := 'last'),
+       cardinality(query_params_from_string('%FF=1&%FE=2')),
+       query_params_from_string('a%FF=1&a%FE=2&a%FD=3', query_values := 'last'),
+       query_params_from_string('a%FF=1&a%FE=2&a%FD=3');
 ----
-7B2261223A22EFBFBDEFBFBDEFBFBD227D	7B2261223A22EFBFBDEFBFBDEFBFBD227D
+{�=2}	1	{a�=3}	{a�=[1, 2, 3]}
+
+# One sanitizer stands behind every function, so an ill-formed sequence lands identically wherever
+# it is read: as a struct field, as a standalone map, as a scalar. The map values are VARCHAR,
+# which DuckDB requires to be well-formed UTF-8.
+query IIIII
+SELECT hex(CAST((url_components('https://example.com/?a=%ED%A0%80', 'last')).query_params AS JSON)::VARCHAR),
+       hex(CAST((url_components('https://example.com/?a=%ED%A0%80', 'all')).query_params AS JSON)::VARCHAR),
+       hex((url_components('https://example.com/?a=%ED%A0%80', 'last')).query_params['a']),
+       hex(CAST(query_params('https://example.com/?a=%ED%A0%80', 'last') AS JSON)::VARCHAR),
+       hex(query_param('https://example.com/?a=%ED%A0%80', 'a'));
+----
+7B2261223A22EFBFBDEFBFBDEFBFBD227D	7B2261223A5B22EFBFBDEFBFBDEFBFBD225D7D	EFBFBDEFBFBDEFBFBD	7B2261223A22EFBFBDEFBFBDEFBFBD227D	EFBFBDEFBFBDEFBFBD

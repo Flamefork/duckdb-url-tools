@@ -57,11 +57,10 @@ also runs under sanitizers in CI.
 section-comment string), has no `base` (`url_components` resolves no base URL),
 and has a non-empty `input` that does not start with `/` (this repo deliberately
 parses `/`-prefixed input as a relative path instead of failing). Failure cases
-must yield a NULL row; the rest are compared on `scheme`, `hostname`, `path` and
-`fragment`. WPT's `search` is not compared: `url_components` exposes decoded query
-params as an object, not the raw search string — a representational difference,
-not a defect. Kept and skipped counts are printed per reason; nothing is dropped
-silently.
+must yield a NULL row; the rest are compared on every field of the default struct
+— `scheme`, `host`, `port`, `path`, `query` and `fragment` — so default-port
+normalization and the raw query are pinned by the spec too. Kept and skipped counts
+are printed per reason; nothing is dropped silently.
 
 **Coverage gap, recorded honestly**: the `/`-prefix skip rule never actually
 fires — every relative input in the corpus carries a `base`, so the base-less

@@ -52,19 +52,23 @@ missing cell means that stack has no comparable form.
 
 | operation | url_tools | netquack | native (stock SQL) |
 |---|---|---|---|
-| `host` | `(url_components(url)).hostname` | `extract_host(url)` | `regexp_extract(...)` |
+| `host` | `(url_components(url)).host` | `extract_host(url)` | `regexp_extract(...)` |
 | `path` | `(url_components(url)).path` | `extract_path(url)` | `regexp_extract(...)` |
-| `query_param` | `query_params(url)->>'utm_source'` | `url_decode(regexp_extract(extract_query_string(url), ...))` | `regexp_extract(...)` |
-| `query_params_all` | `query_params(url)` | `map(...)` over the `extract_query_parameters` table function | `map_from_entries(...)` over `str_split` |
+| `query_param` | `query_param(url, 'utm_source')` | `url_decode(regexp_extract(extract_query_string(url), ...))` | `regexp_extract(...)` |
+| `query_params_all` | `query_params(url, 'last')` | `map(...)` over the `extract_query_parameters` table function | `map_from_entries(...)` over `str_split` |
 | `components` | `url_components(url)` | — | — |
-| `params_from_string` | `query_params_from_string(qs)` | — | `map_from_entries(...)` over `str_split` |
+| `params_from_string` | `query_params_from_string(qs, '&', 'last')` | — | `map_from_entries(...)` over `str_split` |
 
 Contract differences that stay in (the correctness gate pins agreement on
 curated rows where the contracts overlap exactly):
 
 - `native` extracts **raw** (undecoded) values; `url_tools` decodes per WHATWG
   form semantics, and netquack's `url_decode` matches that on `%XX` and `+`.
-- On junk input `url_tools` yields `NULL`, netquack/native yield `''`.
+- On junk input `url_tools` yields `NULL` for component-shaped results and an
+  empty MAP for parameter results; netquack/native yield `''`.
+- The map operations time the `'last'` mode: `MAP(VARCHAR, VARCHAR)` is what the
+  netquack/native emulations build, so the two sides stay comparable. `'all'`
+  (the default) has no counterpart in either stack.
 - The generated data has no duplicate query keys: the MAP-based emulations
   error on duplicates, and last-wins correctness is owned by the property
   harness, not the bench.

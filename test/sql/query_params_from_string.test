@@ -1,70 +1,116 @@
 # name: test/sql/query_params_from_string.test
-# description: query_params_from_string parses a bare query string into a decoded JSON object
+# description: query_params_from_string parses a bare query string into a decoded MAP
 # group: [sql]
 
 require url_tools
 
 require json
 
-# Bare query string, no URL around it (tracking params, url_tags, referrer fields).
-query I
-SELECT query_params_from_string('utm_source=yandex&utm_medium=cpc&utm_campaign=%D0%BB');
+# Bare query string, no URL around it (tracking params, url_tags, referrer fields). The default is
+# 'all': every key carries every one of its values in occurrence order.
+query II
+SELECT query_params_from_string('utm_source=yandex&utm_medium=cpc&utm_campaign=%D0%BB'),
+       typeof(query_params_from_string('a=1'));
 ----
-{"utm_source":"yandex","utm_medium":"cpc","utm_campaign":"л"}
+{utm_source=[yandex], utm_medium=[cpc], utm_campaign=[л]}	MAP(VARCHAR, VARCHAR[])
+
+# The values axis selects the result type, exactly as it does on query_params.
+query IIII
+SELECT query_params_from_string('a=1&b=2&a=3'),
+       query_params_from_string('a=1&b=2&a=3', '&', 'first'),
+       query_params_from_string('a=1&b=2&a=3', '&', 'last'),
+       typeof(query_params_from_string('a=1', '&', 'last'));
+----
+{a=[1, 3], b=[2]}	{a=1, b=2}	{a=3, b=2}	MAP(VARCHAR, VARCHAR)
 
 # A leading '?' is tolerated.
 query I
-SELECT query_params_from_string('?a=1&b=2');
+SELECT query_params_from_string('?a=1&b=2', '&', 'last');
 ----
-{"a":"1","b":"2"}
+{a=1, b=2}
 
-# WHATWG form semantics: '+' as space, valueless keys, '=' inside values, repeats last-wins.
-query I
-SELECT query_params_from_string('plus=a+b&flag&eq=a=b&dup=1&dup=2');
+# WHATWG form semantics: '+' as space, valueless keys, '=' inside values, repeats resolve per mode.
+query II
+SELECT query_params_from_string('plus=a+b&flag&eq=a=b&dup=1&dup=2', '&', 'last'),
+       query_params_from_string('plus=a+b&flag&eq=a=b&dup=1&dup=2');
 ----
-{"plus":"a b","flag":"","eq":"a=b","dup":"2"}
+{plus=a b, flag='', eq='a=b', dup=2}	{plus=[a b], flag=[''], eq=['a=b'], dup=[1, 2]}
 
-# Empty string yields '{}'; NULL propagates.
+# Empty string yields an empty map; NULL propagates.
 query II
 SELECT query_params_from_string(''), query_params_from_string(NULL);
 ----
 {}	NULL
 
-# Custom pair separator, same decode semantics:
-# '+' as space, key ends at the first '=', repeats last-wins, empty segments skipped.
-query I
-SELECT query_params_from_string('foo=bar|plus=a+b%20c|eq=a=b||dup=1|dup=2', '|');
+# Custom pair separator, same decode semantics: '+' as space, key ends at the first '=', empty
+# segments skipped. The values axis composes with it.
+query II
+SELECT query_params_from_string('foo=bar|plus=a+b%20c|eq=a=b||dup=1|dup=2', '|', 'last'),
+       query_params_from_string('k=v1|k2=v2', '|', 'all');
 ----
-{"foo":"bar","plus":"a b c","eq":"a=b","dup":"2"}
+{foo=bar, plus=a b c, eq='a=b', dup=2}	{k=[v1], k2=[v2]}
 
 # A percent-encoded '&' inside a value survives a non-'&' separator.
 query I
-SELECT query_params_from_string('a=x%26y|b=2', '|');
+SELECT query_params_from_string('a=x%26y|b=2', '|', 'last');
 ----
-{"a":"x&y","b":"2"}
+{a=x&y, b=2}
 
 # Separator is a substring, not a character set; explicit '&' matches the 1-arg form.
 query II
-SELECT query_params_from_string('a=1||b=2', '||'),
+SELECT query_params_from_string('a=1||b=2', '||', 'last'),
        query_params_from_string('a=1&b=2', '&') = query_params_from_string('a=1&b=2');
 ----
-{"a":"1","b":"2"}	true
+{a=1, b=2}	true
 
-# Empty separator is a usage error.
+# The separator is an ordinary per-row argument (it does not select the result type), so a column
+# is a legitimate separator — an unnamed second argument is always the separator.
+query I
+SELECT query_params_from_string(qs, sep, 'last') FROM (VALUES ('a=1|b=2', '|'), ('c=3;d=4', ';')) t(qs, sep);
+----
+{a=1, b=2}
+{c=3, d=4}
+
+# Empty separator is a usage error — loud at runtime, where the value arrives.
 statement error
 SELECT query_params_from_string('a=1', '');
 ----
 Invalid Input Error: query_params_from_string: separator must not be empty
 
-# Dedup is linear, not quadratic: a many-unique-key value parses fully.
-# 5000 keys k0..k4999, value "v": deterministic serialized length.
-query I
-SELECT length(query_params_from_string((SELECT string_agg('k' || i || '=v', '&') FROM range(5000) t(i))));
+# The axis, in contrast, selects the result type and is resolved by the binder.
+statement error
+SELECT query_params_from_string('a=1', '&', 'bogus');
 ----
-58891
+Binder Error: query_params_from_string: unknown query_values 'bogus', expected one of 'all', 'first', 'last'
 
-# Last-wins and first-occurrence order still hold at scale.
-query I
-SELECT query_params_from_string((SELECT string_agg('k' || (i % 3) || '=' || i, '&') FROM range(3000) t(i)));
+statement error
+SELECT query_params_from_string('a=1', '&', NULL);
 ----
-{"k0":"2997","k1":"2998","k2":"2999"}
+Binder Error: query_params_from_string: query_values must not be NULL, expected one of 'all', 'first', 'last'
+
+statement error
+SELECT query_params_from_string('a=1', '&', m) FROM (VALUES ('last')) t(m);
+----
+Binder Error: query_params_from_string: query_values must be a constant, one of 'all', 'first', 'last'
+
+# v1 compatibility anchor: the 'last' map cast to JSON is what v1 wrote, byte for byte.
+query I
+SELECT CAST(query_params_from_string('utm_source=yandex&plus=a+b', '&', 'last') AS JSON);
+----
+{"utm_source":"yandex","plus":"a b"}
+
+# Dedup is linear, not quadratic: a many-unique-key value parses fully.
+# 5000 keys k0..k4999, value "v": deterministic cardinality and serialized length.
+query II
+SELECT cardinality(query_params_from_string((SELECT string_agg('k' || i || '=v', '&') FROM range(5000) t(i)))),
+       length(CAST(query_params_from_string((SELECT string_agg('k' || i || '=v', '&') FROM range(5000) t(i)),
+                                            '&', 'last') AS JSON));
+----
+5000	58891
+
+# First-occurrence key order and per-mode value selection still hold at scale.
+query II
+SELECT query_params_from_string((SELECT string_agg('k' || (i % 3) || '=' || i, '&') FROM range(3000) t(i)), '&', 'last'),
+       query_params_from_string((SELECT string_agg('k' || (i % 3) || '=' || i, '&') FROM range(6) t(i)));
+----
+{k0=2997, k1=2998, k2=2999}	{k0=[0, 3], k1=[1, 4], k2=[2, 5]}

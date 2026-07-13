@@ -1,40 +1,138 @@
 # name: test/sql/query_params.test
-# description: query_params extracts a decoded JSON object of query parameters from a URL
+# description: query_params extracts decoded query parameters from a URL as a MAP
 # group: [sql]
 
 require url_tools
 
 require json
 
-# Absolute URL of any scheme, including custom app schemes (deeplinks).
+# The default is 'all': every key carries every one of its values in occurrence order, and a
+# single-valued key is a one-element list — never a bare scalar, so the value type is uniform.
 query II
-SELECT query_params('https://example.com/p?utm_source=yandex&utm_medium=cpc'),
-       query_params('myapp://open?screen=cart&promo=x');
+SELECT query_params('https://example.com/p?utm_source=yandex&utm_medium=cpc&utm_source=direct'),
+       typeof(query_params('https://example.com/p?a=1'));
 ----
-{"utm_source":"yandex","utm_medium":"cpc"}	{"screen":"cart","promo":"x"}
+{utm_source=[yandex, direct], utm_medium=[cpc]}	MAP(VARCHAR, VARCHAR[])
 
-# Relative path input.
-query I
-SELECT query_params('/search?q=1&tab=products');
+# The values axis selects the result type: 'first'/'last' collapse each key to one value.
+query IIII
+SELECT query_params('https://x/?a=1&b=2&a=3', 'first'),
+       query_params('https://x/?a=1&b=2&a=3', 'last'),
+       typeof(query_params('https://x/?a=1', 'first')),
+       typeof(query_params('https://x/?a=1', 'last'));
 ----
-{"q":"1","tab":"products"}
+{a=1, b=2}	{a=3, b=2}	MAP(VARCHAR, VARCHAR)	MAP(VARCHAR, VARCHAR)
 
-# Values decode per WHATWG form semantics: percent-escapes, '+' as space, repeats last-wins.
-query I
-SELECT query_params('https://example.com/?a=%D0%BB&plus=a+b&a=%20x');
-----
-{"a":" x","plus":"a b"}
-
-# No query part or unparseable input yields '{}' so downstream JSON access stays uniform.
+# Key-set invariance: the mode changes values, never the set or order of keys.
 query III
+SELECT map_keys(query_params('https://x/?a=1&b=2&a=3', 'first')),
+       map_keys(query_params('https://x/?a=1&b=2&a=3', 'last')),
+       map_keys(query_params('https://x/?a=1&b=2&a=3', 'all'));
+----
+[a, b]	[a, b]	[a, b]
+
+# Key uniqueness is our invariant — DuckDB does not check a hand-written map vector — so a
+# repeated key is exactly one entry in every mode.
+query IIII
+SELECT cardinality(query_params('https://x/?a=1&a=2', 'last')),
+       query_params('https://x/?a=1&a=2', 'last'),
+       cardinality(query_params('https://x/?a=1&a=2', 'all')),
+       query_params('https://x/?a=1&a=2', 'all');
+----
+1	{a=2}	1	{a=[1, 2]}
+
+# Same inputs as url_components: absolute URL of any scheme (deeplinks included), relative path.
+query III
+SELECT query_params('myapp://open?screen=cart&promo=x', 'last'),
+       query_params('/search?q=1&tab=products', 'last'),
+       query_params('https://example.com/?a=%D0%BB&plus=a+b&a=%20x', 'last');
+----
+{screen=cart, promo=x}	{q=1, tab=products}	{a=' x', plus=a b}
+
+# query_params and url_components' query_params field are the same map in the same mode: one
+# collector, two spellings of one question.
+query II
+SELECT count(*) FILTER (WHERE query_params(u, 'all') IS DISTINCT FROM (url_components(u, 'all')).query_params),
+       count(*) FILTER (WHERE query_params(u, 'last') IS DISTINCT FROM (url_components(u, 'last')).query_params)
+FROM (VALUES
+    ('https://x.ru/?a=1&b=2&a=3'),
+    ('https://x.ru/?plus=a+b&flag&eq=a=b'),
+    ('https://x.ru/?bad=%FF'),
+    ('/relative?c=d'),
+    ('https://x.ru/path'),
+    (NULL)
+) t(u);
+----
+0	0
+
+# They part ways on junk alone, and deliberately: a component row that does not exist is NULL,
+# while a parameter set that does not exist is empty.
+query II
+SELECT query_params('junk'), url_components('junk', 'all') IS NULL;
+----
+{}	true
+
+# v1 compatibility anchor: the 'last' map cast to JSON is what v1's query_params wrote.
+query II
+SELECT CAST(query_params('https://x.ru/?a=1&b=2&a=3', 'last') AS JSON),
+       CAST(query_params('https://x.ru/?q=%22quoted%22%5C&nl=%0A&nonascii=%D0%BB', 'last') AS JSON);
+----
+{"a":"3","b":"2"}	{"q":"\"quoted\"\\","nl":"\n","nonascii":"л"}
+
+# No query part or unparseable input yields an EMPTY map, not a NULL one: the absence of
+# parameters is not the absence of a URL. NULL input is the NULL map.
+query IIIII
 SELECT query_params('https://example.com/path'),
        query_params('not a url at all'),
-       query_params('');
+       cardinality(query_params('junk')),
+       query_params('') IS NULL,
+       query_params(NULL) IS NULL;
 ----
-{}	{}	{}
+{}	{}	0	false	true
 
-# NULL propagates.
-query I
-SELECT query_params(NULL);
+# The axis selects the result type, so it must be a constant the binder can resolve to a known
+# mode; 'raw' belongs to url_components alone (query_params always parses).
+statement error
+SELECT query_params('https://x/', 'bogus');
 ----
-NULL
+Binder Error: query_params: unknown query_values 'bogus', expected one of 'all', 'first', 'last'
+
+statement error
+SELECT query_params('https://x/', 'raw');
+----
+Binder Error: query_params: unknown query_values 'raw', expected one of 'all', 'first', 'last'
+
+statement error
+SELECT query_params('https://x/', NULL);
+----
+Binder Error: query_params: query_values must not be NULL, expected one of 'all', 'first', 'last'
+
+statement error
+SELECT query_params(u, m) FROM (VALUES ('https://x/', 'last')) t(u, m);
+----
+Binder Error: query_params: query_values must be a constant, one of 'all', 'first', 'last'
+
+# Bulk scan in every mode, mixing every input class across chunk boundaries: the maps stay
+# well-formed (one entry per key) and no junk row kills the scan.
+statement ok
+CREATE TABLE mixed AS SELECT CASE i % 5
+    WHEN 0 THEN 'junk ' || i
+    WHEN 1 THEN NULL
+    WHEN 2 THEN 'https://e.com/p?a=' || i || '&a=' || i || '&b=x'
+    WHEN 3 THEN '/rel?q=' || i
+    ELSE 'https://e.com/no-query' END AS u
+FROM range(10000) t(i);
+
+query III
+SELECT count(m) AS non_null_maps,
+       sum(cardinality(m)) AS entries,
+       count(*) FILTER (WHERE len(map_keys(m)) <> len(list_distinct(map_keys(m)))) AS duplicate_key_rows
+FROM (SELECT query_params(u, 'all') AS m FROM mixed);
+----
+8000	6000	0
+
+# The connection is still usable after junk input (no invalidation).
+query I
+SELECT 1;
+----
+1

@@ -2,6 +2,7 @@ from collections import Counter
 from json import loads as json_loads
 from os import environ
 from pathlib import Path
+from re import compile as re_compile
 from subprocess import run as subprocess_run
 from sys import stderr
 
@@ -11,16 +12,20 @@ DEFAULT_BINARY = BUILD_DIR / "duckdb"
 DEFAULT_EXTENSION = BUILD_DIR / "extension" / "url_tools" / "url_tools.duckdb_extension"
 CORPUS = Path(__file__).resolve().parent / "urltestdata.json"
 
+# Split on (and keep) the bytes the CLI's line reader may swallow — see sql_literal.
+CONTROL_BYTE = re_compile(r"([\x00-\x1f\x7f])")
+
 # The single place that maps url_components struct fields onto WPT case keys:
 # (struct field, WPT key, how the WPT value is normalized to ours). WPT reports
-# `protocol` with its trailing ':' and `hash` with its leading '#'; url_components
-# strips both. `search` is deliberately absent — url_components exposes decoded
-# query params as an object, not the raw search string, so the two are not
-# comparable representations (not a defect; see test/README.md).
+# `protocol` with its trailing ':', `search` with its leading '?' and `hash` with its
+# leading '#'; url_components strips all three. WPT spells an absent port as '' and a
+# default port is already normalized away by the parser, so both map to our NULL.
 FIELD_MAPPING = (
     ("scheme", "protocol", lambda value: value.removesuffix(":")),
-    ("hostname", "hostname", lambda value: value),
+    ("host", "hostname", lambda value: value),
+    ("port", "port", lambda value: int(value) if value else None),
     ("path", "pathname", lambda value: value),
+    ("query", "search", lambda value: value.removeprefix("?")),
     ("fragment", "hash", lambda value: value.removeprefix("#")),
 )
 
@@ -51,13 +56,16 @@ KNOWN_ADA_DEVIATIONS = {
 
 def sql_literal(text: str) -> str:
     # A SQL expression evaluating to exactly `text`. The CLI reads stdin as newline-delimited
-    # C-strings, so a raw NUL byte on the wire terminates the line early and the statement is
-    # never seen as complete. Splice NUL back in with chr(0) so the wire carries no raw NUL
-    # while the value is preserved. (Copied from test/property/url_tools_property.py.)
-    if "\x00" not in text:
-        return "'" + text.replace("'", "''") + "'"
-    runs = ["'" + run.replace("'", "''") + "'" for run in text.split("\x00")]
-    return "(" + " || chr(0) || ".join(runs) + ")"
+    # C-strings, so a control byte travelling raw on the wire is at the mercy of the line reader
+    # before the statement is assembled — a NUL ends the line early, a 0x03 opening a continuation
+    # line drops the statement outright. Splice control bytes back in with chr() so the wire only
+    # ever carries printable text. (Copied from test/property/url_tools_property.py.)
+    pieces = [
+        f"chr({ord(chunk)})" if index % 2 else "'" + chunk.replace("'", "''") + "'"
+        for index, chunk in enumerate(CONTROL_BYTE.split(text))
+        if chunk
+    ]
+    return "(" + " || ".join(pieces) + ")" if pieces else "''"
 
 
 # Case selection. url_components resolves no base URL and deliberately deviates from WHATWG
