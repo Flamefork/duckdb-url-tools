@@ -62,8 +62,8 @@ missing cell means that stack has no comparable form.
 
 | operation | url_tools | netquack | native (stock SQL) |
 |---|---|---|---|
-| `host` | `(url_components(url)).host` | `extract_host(url)` | `regexp_extract(...)` |
-| `path` | `(url_components(url)).path` | `extract_path(url)` | `regexp_extract(...)` |
+| `host` | `url_host(url)` | `extract_host(url)` | `regexp_extract(...)` |
+| `path` | `url_path(url)` | `extract_path(url)` | `regexp_extract(...)` |
 | `query_param` | `query_param(url, 'utm_source')` | `url_decode(regexp_extract(extract_query_string(url), ...))` | `regexp_extract(...)` |
 | `query_params_all` | `query_params(url, 'last')` | `map(...)` over the `extract_query_parameters` table function | `map_from_entries(...)` over `str_split` |
 | `components` | `url_components(url)` | — | — |

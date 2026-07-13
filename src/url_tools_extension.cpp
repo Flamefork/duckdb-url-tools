@@ -328,6 +328,50 @@ static UrlToolsParsedInput UrlToolsParseInput(std::string_view raw, UrlToolsLoca
 	return {ada::parse<ada::url_aggregator>(raw), false};
 }
 
+// One reader per component, shared by the accessors and by url_components' struct: the two spellings
+// of "the scheme of this URL" are the same code, so they cannot drift apart. A relative input has no
+// authority, so scheme, host and port are absent together; path, query and fragment are present for
+// every URL that parses at all ('' when it carries none, never NULL).
+using UrlStringField = std::optional<std::string_view> (*)(const ada::url_aggregator &, bool);
+
+static std::optional<std::string_view> UrlSchemeField(const ada::url_aggregator &url, bool relative) {
+	if (relative) {
+		return std::nullopt;
+	}
+	return StripTrailingChar(url.get_protocol(), ':');
+}
+
+static std::optional<std::string_view> UrlHostField(const ada::url_aggregator &url, bool relative) {
+	if (relative) {
+		return std::nullopt;
+	}
+	return url.get_hostname();
+}
+
+static std::optional<std::string_view> UrlPathField(const ada::url_aggregator &url, bool) {
+	return url.get_pathname();
+}
+
+static std::optional<std::string_view> UrlQueryField(const ada::url_aggregator &url, bool) {
+	return StripLeadingChar(url.get_search(), '?');
+}
+
+static std::optional<std::string_view> UrlFragmentField(const ada::url_aggregator &url, bool) {
+	return StripLeadingChar(url.get_hash(), '#');
+}
+
+// ada normalizes the port away when it equals the scheme's default (WHATWG), and reports what is
+// left as an already-validated 16-bit decimal — so the conversion cannot fail.
+static std::optional<uint16_t> UrlPortField(const ada::url_aggregator &url, bool relative) {
+	if (relative || !url.has_port()) {
+		return std::nullopt;
+	}
+	auto port = url.get_port();
+	uint16_t value = 0;
+	std::from_chars(port.data(), port.data() + port.size(), value);
+	return value;
+}
+
 static LogicalType QueryParamsMapType(QueryValuesMode mode) {
 	auto value_type = mode == QueryValuesMode::ALL ? LogicalType::LIST(LogicalType::VARCHAR) : LogicalType::VARCHAR;
 	return LogicalType::MAP(LogicalType::VARCHAR, value_type);
@@ -563,20 +607,12 @@ inline void UrlComponentsScalarFun(DataChunk &args, ExpressionState &state, Vect
 			map_writer->WriteNullRow(row);
 		}
 	};
-	auto set_string_field = [](Vector &vec, idx_t row, std::string_view value) {
-		FlatVector::GetData<string_t>(vec)[row] = UrlToolsAddString(vec, value);
-	};
-	// ada normalizes the port away when it equals the scheme's default (WHATWG), and reports what
-	// is left as an already-validated 16-bit decimal — so the conversion cannot fail.
-	auto set_port_field = [&](idx_t row, const ada::url_aggregator &url) {
-		if (!url.has_port()) {
-			FlatVector::SetNull(port_vec, row, true);
+	auto set_string_field = [](Vector &vec, idx_t row, std::optional<std::string_view> value) {
+		if (!value) {
+			FlatVector::SetNull(vec, row, true);
 			return;
 		}
-		auto port = url.get_port();
-		uint16_t value = 0;
-		std::from_chars(port.data(), port.data() + port.size(), value);
-		FlatVector::GetData<uint16_t>(port_vec)[row] = value;
+		FlatVector::GetData<string_t>(vec)[row] = UrlToolsAddString(vec, *value);
 	};
 
 	UnifiedVectorFormat input_data;
@@ -602,21 +638,20 @@ inline void UrlComponentsScalarFun(DataChunk &args, ExpressionState &state, Vect
 		}
 		auto &url = *parsed.url;
 
-		if (parsed.relative) {
-			FlatVector::SetNull(scheme_vec, row, true);
-			FlatVector::SetNull(host_vec, row, true);
-			FlatVector::SetNull(port_vec, row, true);
+		set_string_field(scheme_vec, row, UrlSchemeField(url, parsed.relative));
+		set_string_field(host_vec, row, UrlHostField(url, parsed.relative));
+		auto port = UrlPortField(url, parsed.relative);
+		if (port) {
+			FlatVector::GetData<uint16_t>(port_vec)[row] = *port;
 		} else {
-			set_string_field(scheme_vec, row, StripTrailingChar(std::string_view(url.get_protocol()), ':'));
-			set_string_field(host_vec, row, std::string_view(url.get_hostname()));
-			set_port_field(row, url);
+			FlatVector::SetNull(port_vec, row, true);
 		}
-		set_string_field(path_vec, row, std::string_view(url.get_pathname()));
-		set_string_field(fragment_vec, row, StripLeadingChar(std::string_view(url.get_hash()), '#'));
+		set_string_field(path_vec, row, UrlPathField(url, parsed.relative));
+		set_string_field(fragment_vec, row, UrlFragmentField(url, parsed.relative));
 
-		auto query = StripLeadingChar(std::string_view(url.get_search()), '?');
+		auto query = UrlQueryField(url, parsed.relative);
 		if (map_writer) {
-			UrlToolsWriteQueryParamsMap(*map_writer, row, query, "&", local_state);
+			UrlToolsWriteQueryParamsMap(*map_writer, row, *query, "&", local_state);
 		} else {
 			set_string_field(query_vec, row, query);
 		}
@@ -762,6 +797,51 @@ inline void QueryParamScalarFun(DataChunk &args, ExpressionState &state, Vector 
 	    });
 }
 
+// url_scheme / url_host / url_path / url_query / url_fragment (varchar) -> one component of the URL.
+// What they do NOT do is why they exist: one parse, one field read, no query parsing, no map, no
+// struct — the cost of url_components(url, 'raw') without the five fields the caller did not ask for.
+// Each equals that struct's field on every input because both read it through the same function.
+template <UrlStringField GetField>
+inline void UrlStringAccessorFun(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &local_state = GetUrlToolsLocalState(state);
+
+	UnaryExecutor::ExecuteWithNulls<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](const string_t &input, ValidityMask &mask, idx_t row) {
+		    auto parsed = UrlToolsParseInput(std::string_view(input.GetDataUnsafe(), input.GetSize()), local_state);
+		    if (!parsed.url) {
+			    mask.SetInvalid(row);
+			    return string_t();
+		    }
+		    auto field = GetField(*parsed.url, parsed.relative);
+		    if (!field) {
+			    mask.SetInvalid(row);
+			    return string_t();
+		    }
+		    return UrlToolsAddString(result, *field);
+	    });
+}
+
+// url_port(varchar) -> USMALLINT. The one accessor whose component is not text; the same NULLs
+// (unparseable input, relative input, no port, the scheme's default port) reach it as one nullopt.
+inline void UrlPortScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &local_state = GetUrlToolsLocalState(state);
+
+	UnaryExecutor::ExecuteWithNulls<string_t, uint16_t>(
+	    args.data[0], result, args.size(), [&](const string_t &input, ValidityMask &mask, idx_t row) -> uint16_t {
+		    auto parsed = UrlToolsParseInput(std::string_view(input.GetDataUnsafe(), input.GetSize()), local_state);
+		    if (!parsed.url) {
+			    mask.SetInvalid(row);
+			    return 0;
+		    }
+		    auto port = UrlPortField(*parsed.url, parsed.relative);
+		    if (!port) {
+			    mask.SetInvalid(row);
+			    return 0;
+		    }
+		    return *port;
+	    });
+}
+
 static void LoadInternal(ExtensionLoader &loader) {
 	// The result type comes from the bind function, so ANY is the registration-time placeholder
 	// (the struct_extract precedent), and the NULL rows are written by the function itself. Every
@@ -815,6 +895,20 @@ static void LoadInternal(ExtensionLoader &loader) {
 	query_param_set.AddFunction(
 	    query_param_function({LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
 	loader.RegisterFunction(query_param_set);
+
+	// The accessors have no axis and no bind: their result type is fixed, and NULL input yielding NULL
+	// is exactly the default null handling, so the executor carries it (and the constant-vector
+	// contract) for them.
+	auto accessor_function = [&loader](const char *name, LogicalType return_type, scalar_function_t function) {
+		loader.RegisterFunction(ScalarFunction(name, {LogicalType::VARCHAR}, std::move(return_type),
+		                                       std::move(function), nullptr, nullptr, nullptr, UrlToolsInitLocalState));
+	};
+	accessor_function("url_scheme", LogicalType::VARCHAR, UrlStringAccessorFun<UrlSchemeField>);
+	accessor_function("url_host", LogicalType::VARCHAR, UrlStringAccessorFun<UrlHostField>);
+	accessor_function("url_port", LogicalType::USMALLINT, UrlPortScalarFun);
+	accessor_function("url_path", LogicalType::VARCHAR, UrlStringAccessorFun<UrlPathField>);
+	accessor_function("url_query", LogicalType::VARCHAR, UrlStringAccessorFun<UrlQueryField>);
+	accessor_function("url_fragment", LogicalType::VARCHAR, UrlStringAccessorFun<UrlFragmentField>);
 }
 
 } // namespace

@@ -45,7 +45,7 @@ OPERATIONS = {
         "input": "urls",
         "column": "url",
         "targets": {
-            "url_tools": "(url_components(url)).host",
+            "url_tools": "url_host(url)",
             "netquack": "extract_host(url)",
             "native": "regexp_extract(url, '^[a-zA-Z][a-zA-Z0-9+.-]*://(?:[^/?#@]*@)?([^/?#:]+)', 1)",
         },
@@ -54,7 +54,7 @@ OPERATIONS = {
         "input": "urls",
         "column": "url",
         "targets": {
-            "url_tools": "(url_components(url)).path",
+            "url_tools": "url_path(url)",
             "netquack": "extract_path(url)",
             "native": "regexp_extract(url, '^[a-zA-Z][a-zA-Z0-9+.-]*://[^/?#]*([^?#]*)', 1)",
         },

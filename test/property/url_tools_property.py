@@ -355,21 +355,51 @@ def test_last_map_matches_v1_json(url: str) -> None:
     assert map_json == v1_json, f"the MAP as JSON is {map_json!r}, v1 wrote {v1_json!r}"
 
 
-# Raw/parsed agreement (law 5, in the spelling available today): the raw query field is exactly the
-# string the param functions parse — the two spellings of "the query of this URL" cannot drift
-# apart. The url_query(u) accessor lands in a later slice; the struct field is the same value.
+# Raw/parsed agreement (law 5): the raw query the accessor hands back is exactly the string the param
+# functions parse — the two spellings of "the query of this URL" cannot drift apart.
 @PROPERTY_SETTINGS
 @example(url="https://example.com/?a=1&a=2&b=%2B")
 @example(url="/search?q=%D0%BB&tab=products")
 @given(url=url_inputs)
 def test_raw_query_reparses_to_the_same_params(url: str) -> None:
     literal = sql_literal(url)
-    from_raw = read_params(f"query_params_from_string((url_components({literal})).query)")
+    from_raw = read_params(f"query_params_from_string(url_query({literal}))")
     direct = read_params(f"query_params({literal})")
     if from_raw is None:
-        assert direct == {}, f"NULL components row but query_params = {direct!r}"
+        assert direct == {}, f"no query (unparseable URL) but query_params = {direct!r}"
     else:
         assert from_raw == direct, f"the raw query parses to {from_raw!r}, query_params says {direct!r}"
+
+
+# The struct field of url_components(u, 'raw'), by accessor.
+URL_ACCESSORS = {
+    "url_scheme": "scheme",
+    "url_host": "host",
+    "url_port": "port",
+    "url_path": "path",
+    "url_query": "query",
+    "url_fragment": "fragment",
+}
+
+
+# Accessor/struct agreement (law 4): each accessor is the corresponding url_components(u, 'raw')
+# field on every input — the relative-input NULLs (no scheme/host/port without an authority) and the
+# ''-for-absent convention included. The accessors exist to skip the other five fields, so this
+# property is what keeps the cheap spelling honest against the complete one.
+@PROPERTY_SETTINGS
+@example(url="https://sub.shop.co.uk:8443/p/x?a=1&b=%20&a=2#f")
+@example(url="https://x.com:443/")
+@example(url="/p?a=1#f")
+@example(url="//host/protocol-relative")
+@given(url=url_inputs)
+def test_accessors_agree_with_components(url: str) -> None:
+    literal = sql_literal(url)
+    for accessor, field in URL_ACCESSORS.items():
+        point = SESSION.read(f"{accessor}({literal})")
+        assert not isinstance(point, UrlToolsSession.Errored), f"{accessor} errored: {point.message}"
+        component = SESSION.read(f"(url_components({literal})).{field}")
+        assert not isinstance(component, UrlToolsSession.Errored), f"url_components errored: {component.message}"
+        assert point == component, f"{accessor} is {point!r}, the struct field {field} is {component!r}"
 
 
 # The bare-query-string variant is total and always yields a map, even on junk that never came near
@@ -430,6 +460,7 @@ PROPERTIES = [
     test_map_keys_are_unique,
     test_last_map_matches_v1_json,
     test_raw_query_reparses_to_the_same_params,
+    test_accessors_agree_with_components,
     test_query_params_from_string_total,
     test_query_params_from_string_separator_total,
     test_empty_separator_fails_loud,

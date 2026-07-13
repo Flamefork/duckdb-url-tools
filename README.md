@@ -22,6 +22,7 @@ Built on [ada](https://github.com/ada-url/ada), the WHATWG-compliant URL parser 
   - `'first'` / `'last'` — `MAP(VARCHAR, VARCHAR)`, the first / last value of every key.
 - **`query_params_from_string(text[, sep[, query_values]])`**: Parses a bare query string (`utm_source=x&utm_medium=y`, no URL around it) into the same `MAP`. A leading `?` is tolerated. The optional pair separator `sep` (default `&`) covers formats like `key=v1|key2=v2`.
 - **`query_param(text, key[, query_values])`**: The decoded value of one key, `VARCHAR`, without building a map. `query_values` is `'last'` (default) or `'first'`; `'all'` has no scalar result — use `query_params(url, 'all')`. An absent key yields `NULL`, a key present with an empty value yields `''`.
+- **`url_scheme(text)`**, **`url_host(text)`**, **`url_path(text)`**, **`url_query(text)`**, **`url_fragment(text)`** → `VARCHAR`, and **`url_port(text)`** → `USMALLINT`: one component of a URL, without building the struct or touching the query parameters — reach for these when you want a single field. Each is exactly the same-named field of `url_components(url)`, NULLs included: `url_scheme` / `url_host` / `url_port` are `NULL` for a relative path, `url_query` / `url_fragment` are `''` on a parseable URL that carries none, and every accessor is `NULL` for unparseable input.
 
 The key set and its order (first occurrence) are the same in every mode — the mode changes values only. Every key appears exactly once.
 
@@ -54,6 +55,12 @@ SELECT query_params('myapp://open?screen=cart&promo=x&promo=y', 'last');
 
 SELECT query_param('https://example.com/?utm_source=duckdb&id=1', 'utm_source');
 -- duckdb
+
+SELECT url_host('https://example.com:8443/path?a=1#top'), url_port('https://example.com:8443/path?a=1#top');
+-- example.com, 8443
+
+SELECT url_path('/search?q=1'), url_scheme('/search?q=1'), url_query('https://example.com/p');
+-- /search, NULL, ''
 
 SELECT query_params_from_string('utm_source=yandex&plus=a+b', query_values := 'last');
 -- {utm_source=yandex, plus=a b}

@@ -1,0 +1,115 @@
+# name: test/sql/url_accessors.test
+# description: the component accessors read one field of a URL and agree with url_components on every input
+# group: [sql]
+
+require url_tools
+
+# The whole struct, one field at a time: scheme without ':', host without port, port as USMALLINT,
+# path, query undecoded and without '?', fragment without '#'.
+query IIIIII
+SELECT url_scheme('https://sub.shop.co.uk:8443/p/x?a=1&b=%20&a=2#f'),
+       url_host('https://sub.shop.co.uk:8443/p/x?a=1&b=%20&a=2#f'),
+       url_port('https://sub.shop.co.uk:8443/p/x?a=1&b=%20&a=2#f'),
+       url_path('https://sub.shop.co.uk:8443/p/x?a=1&b=%20&a=2#f'),
+       url_query('https://sub.shop.co.uk:8443/p/x?a=1&b=%20&a=2#f'),
+       url_fragment('https://sub.shop.co.uk:8443/p/x?a=1&b=%20&a=2#f');
+----
+https	sub.shop.co.uk	8443	/p/x	a=1&b=%20&a=2	f
+
+# url_port is the one accessor that is not text.
+query II
+SELECT typeof(url_port('https://x.com:8443/')), typeof(url_host('https://x.com:8443/'));
+----
+USMALLINT	VARCHAR
+
+# Port is NULL when absent or equal to the scheme's default (WHATWG normalization); a non-special
+# scheme has no default, so its port survives.
+query IIIII
+SELECT url_port('https://x.com:443/'),
+       url_port('http://x.com:80/'),
+       url_port('https://x.com/'),
+       url_port('https://x.com:8443/'),
+       url_port('goal://counter:443/');
+----
+NULL	NULL	NULL	8443	443
+
+# A parseable URL that carries no query or fragment yields '', not NULL: the absent part of a URL
+# that exists is empty, and NULL is reserved for the URL that does not.
+query IIII
+SELECT url_query('https://x.com/p'),
+       url_fragment('https://x.com/p'),
+       url_query('https://x.com/p?') IS NULL,
+       url_fragment('https://x.com/p#') IS NULL;
+----
+(empty)	(empty)	false	false
+
+# Relative path input has no authority: scheme, host and port are NULL together, while path, query
+# and fragment parse per WHATWG.
+query IIIIII
+SELECT url_scheme('/p?a=1#f'), url_host('/p?a=1#f'), url_port('/p?a=1#f'),
+       url_path('/p?a=1#f'), url_query('/p?a=1#f'), url_fragment('/p?a=1#f');
+----
+NULL	NULL	NULL	/p	a=1	f
+
+# Totality: junk, protocol-relative, empty and NULL input yield NULL from every accessor — never an
+# error, so one junk value cannot fail a scan.
+query I
+SELECT count(*) FROM (VALUES ('not a url'), ('http://[invalid'), ('//example.com/path'), (''), (NULL)) t(u)
+WHERE url_scheme(u) IS NOT NULL OR url_host(u) IS NOT NULL OR url_port(u) IS NOT NULL
+   OR url_path(u) IS NOT NULL OR url_query(u) IS NOT NULL OR url_fragment(u) IS NOT NULL;
+----
+0
+
+# Law 4: an accessor is the corresponding url_components(u, 'raw') field on EVERY input — the two
+# spellings of the same component cannot drift apart. Checked across every input class, including
+# the NULL rows where both sides must be NULL.
+query I
+SELECT count(*) FROM (VALUES
+    ('https://sub.shop.co.uk:8443/p/x?a=1&b=%20&a=2#f'),
+    ('https://x.com/p'),
+    ('https://x.com:443/'),
+    ('goal://counter/signup?x=1'),
+    ('http://user:pass@x.com/p;a?q=1#h'),
+    ('https://кто.рф/путь?q=%D0%BB'),
+    ('http://[::1]:8080/'),
+    ('/relative?c=d#e'),
+    ('/'),
+    ('//example.com/path'),
+    ('not a url'),
+    (''),
+    (NULL)
+) t(u)
+WHERE url_scheme(u) IS DISTINCT FROM (url_components(u)).scheme
+   OR url_host(u) IS DISTINCT FROM (url_components(u)).host
+   OR url_port(u) IS DISTINCT FROM (url_components(u)).port
+   OR url_path(u) IS DISTINCT FROM (url_components(u)).path
+   OR url_query(u) IS DISTINCT FROM (url_components(u)).query
+   OR url_fragment(u) IS DISTINCT FROM (url_components(u)).fragment;
+----
+0
+
+# The raw query is exactly what the param functions parse: url_query feeds query_params_from_string
+# back into query_params (law 5).
+query II
+SELECT query_params_from_string(url_query('https://x.ru/?a=1&b=%20&a=2'), '&', 'all')
+     = query_params('https://x.ru/?a=1&b=%20&a=2', 'all'),
+       query_params_from_string(url_query('/rel?plus=a+b'), '&', 'last')
+     = query_params('/rel?plus=a+b', 'last');
+----
+true	true
+
+# Bulk scan over mixed input classes: every accessor stays total across chunk boundaries and the
+# connection survives the junk rows.
+statement ok
+CREATE TABLE mixed AS SELECT CASE i % 5
+    WHEN 0 THEN 'junk ' || i
+    WHEN 1 THEN NULL
+    WHEN 2 THEN 'https://e.com:8443/p' || i || '?a=' || i || '#f'
+    WHEN 3 THEN '/rel?q=' || i
+    ELSE 'https://e.com/no-query' END AS u
+FROM range(10000) t(i);
+
+query IIII
+SELECT count(url_scheme(u)), count(url_port(u)), count(url_path(u)), count(url_fragment(u)) FROM mixed;
+----
+4000	2000	6000	6000
