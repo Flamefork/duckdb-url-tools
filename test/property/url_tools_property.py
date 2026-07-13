@@ -402,6 +402,30 @@ def test_accessors_agree_with_components(url: str) -> None:
         assert point == component, f"{accessor} is {point!r}, the struct field {field} is {component!r}"
 
 
+# Domain containment (law 8): a non-NULL url_domain is a suffix of url_host and carries at least one
+# dot. It is a public suffix plus one label, so it can be neither absent from the host nor a single
+# label. url_domain is the one function whose answer comes out of a vendored data file, and this is
+# what keeps that answer tied to the host it was derived from — whatever the list says.
+@PROPERTY_SETTINGS
+@example(url="https://m.ozon.ru/p/1")
+@example(url="https://shop.example.co.uk/")
+@example(url="https://кто.рф/")
+@example(url="https://a.foo.ck/")
+@example(url="https://192.168.0.1/")
+@given(url=url_inputs)
+def test_domain_is_a_suffix_of_the_host(url: str) -> None:
+    literal = sql_literal(url)
+    domain = SESSION.read(f"url_domain({literal})")
+    assert not isinstance(domain, UrlToolsSession.Errored), f"url_domain errored: {domain.message}"
+    if domain is None:
+        return
+    host = SESSION.read(f"url_host({literal})")
+    assert not isinstance(host, UrlToolsSession.Errored), f"url_host errored: {host.message}"
+    assert host is not None, f"url_domain is {domain!r} for a URL with no host at all"
+    assert host.endswith(domain), f"url_domain {domain!r} is not a suffix of the host {host!r}"
+    assert "." in domain, f"url_domain {domain!r} carries no dot, so it is not a suffix plus a label"
+
+
 # The loose variant is total on anything at all — it is the one function whose input is not even
 # expected to be a URL — and it always yields a map, never NULL for a non-NULL input.
 @PROPERTY_SETTINGS
@@ -496,6 +520,7 @@ PROPERTIES = [
     test_last_map_matches_v1_json,
     test_raw_query_reparses_to_the_same_params,
     test_accessors_agree_with_components,
+    test_domain_is_a_suffix_of_the_host,
     test_query_params_loose_total,
     test_loose_is_conservative,
     test_query_params_from_string_total,

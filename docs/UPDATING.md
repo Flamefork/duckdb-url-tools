@@ -47,6 +47,37 @@ fresh upstream release and sync `docs/THIRD_PARTY_NOTICES.md`.
    may legitimately turn allowlisted cases green, and the runner fails until the
    stale `KNOWN_ADA_DEVIATIONS` entries are deleted (see `test/README.md`).
 
+### Public Suffix List (url_domain)
+
+The list is a data dependency, not code: it is pinned to an upstream commit and
+compiled into the binary, so `url_domain` answers the same for a given build no
+matter when or where it runs. It is never fetched at build or at run time.
+
+1. Pick the commit to pin (the list changes most days; a refresh is a deliberate
+   act, like the WPT corpus). Download that exact revision — from the
+   `publicsuffix/list` repository, or from
+   https://publicsuffix.org/list/public_suffix_list.dat, which serves the tip:
+
+   ```shell
+   curl -o third_party/psl/public_suffix_list.dat \
+     https://raw.githubusercontent.com/publicsuffix/list/<commit>/public_suffix_list.dat
+   ```
+2. Regenerate the compiled rule table (the only file in `third_party/` that is
+   produced rather than downloaded; the extension links it, never the `.dat`):
+
+   ```shell
+   uv run scripts/generate_psl.py
+   ```
+3. Update the pinned commit and its date in `docs/THIRD_PARTY_NOTICES.md`.
+4. Run `uv run make verify` and the property harness (see above). Registrable
+   domains move with the list: a suffix added upstream (a new eTLD, a new entry
+   in the PRIVATE section) legitimately changes `url_domain` for hosts under it,
+   so a SQLLogic case failing after a refresh is a decision to make, not
+   automatically a bug — check the rule in the new `.dat` before touching the
+   test.
+5. Commit the `.dat`, the regenerated table and the notices together: they are
+   one snapshot, and a build from a mixed pair is not reproducible.
+
 ### ankerl unordered_dense
 
 1. Take `include/ankerl/unordered_dense.h` (and `stl.h`, if still present) from

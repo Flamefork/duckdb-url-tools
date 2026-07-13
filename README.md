@@ -29,6 +29,9 @@ Built on [ada](https://github.com/ada-url/ada), the WHATWG-compliant URL parser 
   The pair separator is `&`. On a URL whose fragment carries neither `?` nor `=`, `query_params_loose` is exactly `query_params`.
 - **`query_param(text, key[, query_values])`**: The decoded value of one key, `VARCHAR`, without building a map. `query_values` is `'last'` (default) or `'first'`; `'all'` has no scalar result — use `query_params(url, 'all')`. An absent key yields `NULL`, a key present with an empty value yields `''`.
 - **`url_scheme(text)`**, **`url_host(text)`**, **`url_path(text)`**, **`url_query(text)`**, **`url_fragment(text)`** → `VARCHAR`, and **`url_port(text)`** → `USMALLINT`: one component of a URL, without building the struct or touching the query parameters — reach for these when you want a single field. Each is exactly the same-named field of `url_components(url)`, NULLs included: `url_scheme` / `url_host` / `url_port` are `NULL` for a relative path, `url_query` / `url_fragment` are `''` on a parseable URL that carries none, and every accessor is `NULL` for unparseable input.
+- **`url_domain(text)`** → `VARCHAR`: the registrable domain (eTLD+1) of the URL's host — what "one site" means when you group by it. `https://m.ozon.ru/p` and `https://ozon.ru/` both yield `ozon.ru`; `shop.example.co.uk` yields `example.co.uk`; `alice.github.io` yields `alice.github.io` (`github.io` is a public suffix). The answer is `NULL` wherever no registrable domain exists: an IP-literal host (`192.168.0.1`, `[::1]`), a host that *is* a public suffix (`co.uk`), a single label (`localhost`), a host carrying an empty label — one the parser accepts as it stands but no name registers under (`https://foo..example.com/`, `http://x.com../`) — and relative or unparseable input. The host is the parser's serialization, so an internationalized domain answers in punycode (`https://кто.рф/` → `xn--j1ail.xn--p1ai`).
+
+  The suffixes come from a [Public Suffix List](https://publicsuffix.org/list/) snapshot compiled into the extension (wildcard and exception rules included, so `a.foo.ck` → `a.foo.ck` and `x.www.ck` → `www.ck`). Nothing is fetched at run time, and a given binary always answers the same; refreshing the snapshot is a deliberate act (see [docs/UPDATING.md](docs/UPDATING.md)).
 
 The key set and its order (first occurrence) are the same in every mode — the mode changes values only. Every key appears exactly once.
 
@@ -67,6 +70,9 @@ SELECT url_host('https://example.com:8443/path?a=1#top'), url_port('https://exam
 
 SELECT url_path('/search?q=1'), url_scheme('/search?q=1'), url_query('https://example.com/p');
 -- /search, NULL, ''
+
+SELECT url_domain('https://m.ozon.ru/p/1'), url_domain('https://shop.example.co.uk/'), url_domain('http://localhost/');
+-- ozon.ru, example.co.uk, NULL
 
 SELECT query_params_loose('https://shop.ru/#/cart?utm_source=push', 'last');
 -- {utm_source=push}

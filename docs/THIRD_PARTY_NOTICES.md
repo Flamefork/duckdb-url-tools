@@ -37,6 +37,20 @@ Copyright 2023 Yagiz Nizipli and Daniel Lemire.
 
 Copyright 2022 Martin Leitner-Ankerl.
 
+### Public Suffix List
+
+- Upstream: https://github.com/publicsuffix/list (https://publicsuffix.org/list/)
+- Version: commit `b9a86cf0cd115f1e60b5815533f3fcfd2f9e8f4b` (2026-07-07), file `public_suffix_list.dat`
+- Files: `third_party/psl/public_suffix_list.dat` (upstream, verbatim) and
+  `third_party/psl/psl_rules.cpp` (generated from it by `scripts/generate_psl.py`; compiled into
+  the extension binary, which `url_domain` answers from)
+- License: Mozilla Public License 2.0 (MPL-2.0)
+- License text: `LICENSE` in the upstream repository; the notice is also carried in the header of
+  the vendored `.dat`
+
+The generated rule table is a mechanical transformation of the list — comments dropped, each rule
+emitted as a C string — so it is covered by the same license as the list itself.
+
 ### web-platform-tests URL corpus
 
 - Upstream: https://github.com/web-platform-tests/wpt

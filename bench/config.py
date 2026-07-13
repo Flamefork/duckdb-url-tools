@@ -74,6 +74,16 @@ OPERATIONS = {
             "native": "regexp_extract(url, '^[a-zA-Z][a-zA-Z0-9+.-]*://(?:[^/?#@]*@)?([^/?#:]+)', 1)",
         },
     },
+    # Both sides consult a Public Suffix List, which is the only way to answer this at all — stock SQL
+    # has no comparable spelling, and its absence here is that statement.
+    "domain": {
+        "input": "urls",
+        "column": "url",
+        "targets": {
+            "url_tools": "url_domain(url)",
+            "netquack": "extract_domain(url)",
+        },
+    },
     "path": {
         "input": "urls",
         "column": "url",

@@ -1,0 +1,162 @@
+# name: test/sql/url_domain.test
+# description: url_domain is the registrable domain (eTLD+1) of a URL's host, per the Public Suffix List
+# group: [sql]
+
+require url_tools
+
+# The unit "one site" is counted in: every host under a registrable domain answers that domain, and
+# the domain itself answers itself. A multi-label public suffix ('co.uk') takes its whole length.
+query IIII
+SELECT url_domain('https://m.ozon.ru/p/1'),
+       url_domain('https://ozon.ru/'),
+       url_domain('https://shop.example.co.uk/'),
+       url_domain('https://a.b.c.example.co.uk/');
+----
+ozon.ru	ozon.ru	example.co.uk	example.co.uk
+
+# The list's PRIVATE section counts: github.io is a public suffix there, so a user page is its own
+# registrable domain rather than a subdomain of github.io. That falls out of the algorithm — the
+# section is not treated specially, it is simply part of the list.
+query I
+SELECT url_domain('https://alice.github.io/x');
+----
+alice.github.io
+
+# The host is the parser's serialization, so an IDN answers in punycode — the same form it is stored
+# and joined on. The rule matched here ('рф') is written in Unicode in the list, so this also pins
+# that the list's IDN rules reach the punycode hosts they are about.
+query III
+SELECT url_domain('https://кто.рф/'),
+       url_domain('https://xn--j1ail.xn--p1ai/'),
+       url_domain('https://x.公司.cn/');
+----
+xn--j1ail.xn--p1ai	xn--j1ail.xn--p1ai	x.xn--55qx5d.cn
+
+# A wildcard rule ('*.ck') makes EVERY single label under it a public suffix: foo.ck is a suffix, so
+# it has no registrable domain, and the domain of a host under it starts one label further left.
+query II
+SELECT url_domain('https://foo.ck/'), url_domain('https://a.foo.ck/');
+----
+NULL	a.foo.ck
+
+# An exception rule ('!www.ck') carves one name back out of its wildcard: www.ck IS registrable, and
+# a host under it registers to www.ck rather than to itself. The exception prevails over the wildcard
+# no matter how many labels the host carries.
+query III
+SELECT url_domain('https://www.ck/'), url_domain('https://x.www.ck/'), url_domain('https://a.b.www.ck/');
+----
+www.ck	www.ck	www.ck
+
+# The same pair once more, with the rules the list carries for Japanese cities ('*.kawasaki.jp' and
+# '!city.kawasaki.jp') — the wildcard and its exception are not one-offs of the .ck section.
+query IIII
+SELECT url_domain('https://foo.kawasaki.jp/'),
+       url_domain('https://x.foo.kawasaki.jp/'),
+       url_domain('https://city.kawasaki.jp/'),
+       url_domain('https://x.city.kawasaki.jp/');
+----
+NULL	x.foo.kawasaki.jp	city.kawasaki.jp	city.kawasaki.jp
+
+# A TLD the list does not carry is still a suffix of one label — the algorithm's implicit '*' rule —
+# so an unknown TLD behaves exactly like a known single-label one instead of yielding nothing.
+query II
+SELECT url_domain('https://x.unlistedtld/'), url_domain('https://unlistedtld/');
+----
+x.unlistedtld	NULL
+
+# NULL is the answer wherever no registrable domain exists: an address is not a name (v4 and v6), a
+# host that IS a public suffix has nothing to its left, and a single label has no suffix at all.
+query IIIIII
+SELECT url_domain('https://192.168.0.1/'),
+       url_domain('https://[::1]/'),
+       url_domain('https://co.uk/'),
+       url_domain('https://com/'),
+       url_domain('http://localhost/'),
+       url_domain('file:///etc/passwd');
+----
+NULL	NULL	NULL	NULL	NULL	NULL
+
+# Totality: a relative path (no authority at all), junk, protocol-relative, empty and NULL input all
+# yield NULL — never an error, so one junk value cannot fail a scan.
+query I
+SELECT count(url_domain(u)) FROM (VALUES
+    ('/rel?a=1'), ('not a url'), ('http://[invalid'), ('//example.com/path'), (''), (NULL)
+) t(u);
+----
+0
+
+# The root label of an FQDN takes no part in matching, but it stays in the answer: what comes back is
+# always a suffix of the host the caller can read with url_host (law 8), trailing dot included.
+query II
+SELECT url_domain('https://example.com./'), url_host('https://example.com./');
+----
+example.com.	example.com.
+
+# An empty label is not a label. ada parses such a host and hands it over as it stands, so the walk
+# is where it has to be caught: a host carrying one is not a domain name, and a name is what a
+# registrable domain is a part of. Anything else answers a nonsense suffix ('example..com.' → '.com.')
+# or, worse, a plausible one that the host does not actually sit under.
+query IIIII
+SELECT url_domain('https://foo..example.com/'),
+       url_domain('https://.example.com/'),
+       url_domain('https://example..com./'),
+       url_domain('https://.com/'),
+       url_domain('https://../');
+----
+NULL	NULL	NULL	NULL	NULL
+
+# The root label is the one empty label that is not one: only the LAST dot of an FQDN is the root, so
+# a host that is nothing but dots keeps nothing behind, and a doubled trailing dot is an empty label
+# like any other.
+query III
+SELECT url_domain('https://./'), url_domain('http://x.com../'), url_host('https://./');
+----
+NULL	NULL	.
+
+# Law 8, over every input class above: a non-NULL url_domain is a suffix of url_host and carries at
+# least one dot — the registrable domain is a public suffix plus a label, so it cannot be one label.
+query I
+SELECT count(*) FROM (VALUES
+    ('https://m.ozon.ru/p/1'),
+    ('https://shop.example.co.uk/'),
+    ('https://alice.github.io/x'),
+    ('https://кто.рф/'),
+    ('https://a.foo.ck/'),
+    ('https://a.b.www.ck/'),
+    ('https://x.foo.kawasaki.jp/'),
+    ('https://x.unlistedtld/'),
+    ('https://example.com./'),
+    ('http://user:pass@sub.example.com:8443/p?q=1#h'),
+    ('goal://app.example.com/signup'),
+    ('https://192.168.0.1/'),
+    ('https://co.uk/'),
+    ('/rel'),
+    ('not a url'),
+    (''),
+    (NULL)
+) t(u)
+WHERE url_domain(u) IS NOT NULL
+  AND (NOT ends_with(url_host(u), url_domain(u)) OR NOT contains(url_domain(u), '.'));
+----
+0
+
+# Bulk scan across chunk boundaries, mixing every input class: the lookup stays total, the shared
+# index is built once under whatever thread gets there first, and the connection survives the junk.
+statement ok
+CREATE TABLE mixed AS SELECT CASE i % 5
+    WHEN 0 THEN 'junk ' || i
+    WHEN 1 THEN NULL
+    WHEN 2 THEN 'https://m' || i || '.shop.co.uk/p?a=1'
+    WHEN 3 THEN 'https://192.168.0.' || (i % 256) || '/'
+    ELSE 'https://sub' || i || '.example.com/' END AS u
+FROM range(10000) t(i);
+
+query III
+SELECT count(url_domain(u)), count(DISTINCT url_domain(u)), min(url_domain(u)) FROM mixed;
+----
+4000	2	example.com
+
+query I
+SELECT 1;
+----
+1

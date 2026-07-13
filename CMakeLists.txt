@@ -13,9 +13,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Vendored code lives in third_party/ so the format/tidy gates (scoped to src/
 # and test/) never touch it.
-include_directories(src/include third_party third_party/ada)
+include_directories(src/include third_party third_party/ada third_party/psl)
 
-set(EXTENSION_SOURCES third_party/ada/ada.cpp src/url_tools_extension.cpp)
+set(EXTENSION_SOURCES third_party/ada/ada.cpp third_party/psl/psl_rules.cpp
+                      src/url_tools_extension.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
