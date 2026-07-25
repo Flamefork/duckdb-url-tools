@@ -30,11 +30,13 @@ SELECT query_params_from_string('?a=1&b=2', '&', 'last');
 {a=1, b=2}
 
 # WHATWG form semantics: '+' as space, valueless keys, '=' inside values, repeats resolve per mode.
-query II
+# A valueless key keeps its key and answers NULL — 'flag' and 'flag=' are one and the same pair.
+query III
 SELECT query_params_from_string('plus=a+b&flag&eq=a=b&dup=1&dup=2', '&', 'last'),
-       query_params_from_string('plus=a+b&flag&eq=a=b&dup=1&dup=2');
+       query_params_from_string('plus=a+b&flag&eq=a=b&dup=1&dup=2'),
+       query_params_from_string('flag', '&', 'last') = query_params_from_string('flag=', '&', 'last');
 ----
-{plus=a b, flag='', eq='a=b', dup=2}	{plus=[a b], flag=[''], eq=['a=b'], dup=[1, 2]}
+{plus=a b, flag=NULL, eq='a=b', dup=2}	{plus=[a b], flag=[NULL], eq=['a=b'], dup=[1, 2]}	true
 
 # Empty string yields an empty map; NULL propagates.
 query II

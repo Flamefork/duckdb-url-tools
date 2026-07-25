@@ -258,6 +258,10 @@ struct UrlToolsMapWriter {
 	      mode(mode) {
 	}
 
+	// The key is written as it stands and the value is not: an empty key is a key ('?=1' carries
+	// one), while an empty value is the extension's NULL — '?flag', '?a=' and a key the query never
+	// mentions all answer alike. What separates the first two from the third is the key, which the
+	// map keeps either way, so nothing the map could say is lost by saying it once.
 	void WriteRow(idx_t row, UrlToolsLocalState &local_state) {
 		auto &params = local_state.query_params;
 		ListVector::Reserve(map_vec, entry_count + params.size());
@@ -274,7 +278,12 @@ struct UrlToolsMapWriter {
 				keys[entry_count] = UrlToolsAddString(keys_vec, param.key);
 				value_lists[entry_count] = list_entry_t(value_count, param.count);
 				for (auto value = param.first_value; value != DConstants::INVALID_INDEX;) {
-					value_strings[value_count] = UrlToolsAddString(value_child, local_state.query_values[value].value);
+					auto text = local_state.query_values[value].value;
+					if (text.empty()) {
+						FlatVector::SetNull(value_child, value_count, true);
+					} else {
+						value_strings[value_count] = UrlToolsAddString(value_child, text);
+					}
 					value_count++;
 					value = local_state.query_values[value].next;
 				}
@@ -285,7 +294,12 @@ struct UrlToolsMapWriter {
 			for (const auto &param : params) {
 				keys[entry_count] = UrlToolsAddString(keys_vec, param.key);
 				auto value = mode == QueryValuesMode::FIRST ? param.first_value : param.last_value;
-				values[entry_count] = UrlToolsAddString(values_vec, local_state.query_values[value].value);
+				auto text = local_state.query_values[value].value;
+				if (text.empty()) {
+					FlatVector::SetNull(values_vec, entry_count, true);
+				} else {
+					values[entry_count] = UrlToolsAddString(values_vec, text);
+				}
 				entry_count++;
 			}
 		}
@@ -402,10 +416,23 @@ static void UrlToolsCollectLooseParams(std::string_view raw, ada::url_search_par
 	}
 }
 
+// An empty component is no component. WHATWG's own getters already collapse an absent query onto an
+// empty one ('https://x/p' and 'https://x/p?' both read ''), and the distinctions the parser could
+// still draw — an opaque path's missing host against a file URL's empty one — are not distinctions a
+// caller acts on. So the extension draws none of them and answers NULL for all of it: one spelling
+// of "nothing is here", never an empty string. The single empty string that survives anywhere is a
+// MAP key, where it IS the key and nothing is missing.
+static std::optional<std::string_view> NullIfEmpty(std::string_view value) {
+	if (value.empty()) {
+		return std::nullopt;
+	}
+	return value;
+}
+
 // One reader per component, shared by the accessors and by url_components' struct: the two spellings
 // of "the scheme of this URL" are the same code, so they cannot drift apart. A relative input has no
-// authority, so scheme, host and port are absent together; path, query and fragment are present for
-// every URL that parses at all ('' when it carries none, never NULL).
+// authority, so scheme, host and port are absent together. A scheme needs no emptiness check: a URL
+// that parses at all carries one.
 using UrlStringField = std::optional<std::string_view> (*)(const ada::url_aggregator &, bool);
 
 static std::optional<std::string_view> UrlSchemeField(const ada::url_aggregator &url, bool relative) {
@@ -419,19 +446,19 @@ static std::optional<std::string_view> UrlHostField(const ada::url_aggregator &u
 	if (relative) {
 		return std::nullopt;
 	}
-	return url.get_hostname();
+	return NullIfEmpty(url.get_hostname());
 }
 
 static std::optional<std::string_view> UrlPathField(const ada::url_aggregator &url, bool) {
-	return url.get_pathname();
+	return NullIfEmpty(url.get_pathname());
 }
 
 static std::optional<std::string_view> UrlQueryField(const ada::url_aggregator &url, bool) {
-	return StripLeadingChar(url.get_search(), '?');
+	return NullIfEmpty(StripLeadingChar(url.get_search(), '?'));
 }
 
 static std::optional<std::string_view> UrlFragmentField(const ada::url_aggregator &url, bool) {
-	return StripLeadingChar(url.get_hash(), '#');
+	return NullIfEmpty(StripLeadingChar(url.get_hash(), '#'));
 }
 
 // ada normalizes the port away when it equals the scheme's default (WHATWG), and reports what is
@@ -739,7 +766,7 @@ inline void UrlComponentsScalarFun(DataChunk &args, ExpressionState &state, Vect
 
 		auto query = UrlQueryField(url, parsed.relative);
 		if (map_writer) {
-			UrlToolsWriteQueryParamsMap(*map_writer, row, *query, "&", local_state);
+			UrlToolsWriteQueryParamsMap(*map_writer, row, query.value_or(std::string_view()), "&", local_state);
 		} else {
 			set_string_field(query_vec, row, query);
 		}
@@ -874,7 +901,10 @@ inline void QueryParamsFromStringScalarFun(DataChunk &args, ExpressionState &sta
 
 // query_param(varchar, varchar [, values]) -> the decoded value of one key. It stops at that value:
 // no map is built and no per-key collection happens, which is the whole reason to reach for it
-// instead of query_params(url)[key]. An absent key is NULL; a present key with an empty value is ''.
+// instead of query_params(url)[key]. An absent key, a valueless key ('?flag') and a key with an
+// empty value ('?a=') all answer NULL — the same answer query_params(url)[key] gives, since an empty
+// value is written as NULL there too. A caller who needs to tell them apart asks the map for its
+// keys, which is where that fact lives.
 inline void QueryParamScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &local_state = GetUrlToolsLocalState(state);
 	auto mode = BoundQueryValuesMode(state);
@@ -905,7 +935,7 @@ inline void QueryParamScalarFun(DataChunk &args, ExpressionState &state, Vector 
 				    break;
 			    }
 		    }
-		    if (!found) {
+		    if (!found || found->empty()) {
 			    mask.SetInvalid(row);
 			    return string_t();
 		    }

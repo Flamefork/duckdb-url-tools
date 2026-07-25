@@ -66,7 +66,9 @@ def loose_entries(source: str) -> str:
 # Contract differences that stay in (documented, gate rows avoid them):
 # - `native` extracts raw (undecoded) values; url_tools decodes per WHATWG and
 #   netquack's url_decode matches it on %XX and '+'.
-# - On junk input url_tools yields NULL, netquack/native yield ''.
+# - url_tools returns no empty strings at all: junk input, a component the URL
+#   does not carry and a parameter with no value are alike NULL (a parameter map
+#   for junk is empty rather than NULL). netquack/native yield '' throughout.
 # - The map operations time the 'last' mode: MAP(VARCHAR, VARCHAR) is the shape
 #   the netquack/native emulations produce, so the comparison stays a comparison.
 OPERATIONS = {

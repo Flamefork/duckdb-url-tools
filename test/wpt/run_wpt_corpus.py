@@ -18,15 +18,18 @@ CONTROL_BYTE = re_compile(r"([\x00-\x1f\x7f])")
 # The single place that maps url_components struct fields onto WPT case keys:
 # (struct field, WPT key, how the WPT value is normalized to ours). WPT reports
 # `protocol` with its trailing ':', `search` with its leading '?' and `hash` with its
-# leading '#'; url_components strips all three. WPT spells an absent port as '' and a
-# default port is already normalized away by the parser, so both map to our NULL.
+# leading '#'; url_components strips all three. Everywhere WPT spells a component it does
+# not have as '' — an absent port, an opaque path's host, a URL carrying no query or
+# fragment — url_components answers NULL, so an empty WPT value maps onto our None. The
+# WHATWG getters collapse "absent" and "empty" the same way we do, which is what lets a
+# single normalization stand in for both.
 FIELD_MAPPING = (
     ("scheme", "protocol", lambda value: value.removesuffix(":")),
-    ("host", "hostname", lambda value: value),
+    ("host", "hostname", lambda value: value or None),
     ("port", "port", lambda value: int(value) if value else None),
-    ("path", "pathname", lambda value: value),
-    ("query", "search", lambda value: value.removeprefix("?")),
-    ("fragment", "hash", lambda value: value.removeprefix("#")),
+    ("path", "pathname", lambda value: value or None),
+    ("query", "search", lambda value: value.removeprefix("?") or None),
+    ("fragment", "hash", lambda value: value.removeprefix("#") or None),
 )
 
 # A deviation is (field, expected, got); "<row>" means the whole struct, not one field.

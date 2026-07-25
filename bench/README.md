@@ -83,8 +83,11 @@ curated rows where the contracts overlap exactly):
 
 - `native` extracts **raw** (undecoded) values; `url_tools` decodes per WHATWG
   form semantics, and netquack's `url_decode` matches that on `%XX` and `+`.
-- On junk input `url_tools` yields `NULL` for component-shaped results and an
-  empty MAP for parameter results; netquack/native yield `''`.
+- `url_tools` returns no empty strings at all: junk input, a component the URL
+  does not carry (`url_query` of a URL with no query) and a parameter with no
+  value (`?flag`) are alike `NULL`, and a parameter result for junk is an empty
+  MAP. netquack/native yield `''` throughout. The gate rows are curated so the
+  two contracts overlap exactly, which is why the difference stays out of them.
 - The map operations time the `'last'` mode: `MAP(VARCHAR, VARCHAR)` is what the
   netquack/native emulations build, so the two sides stay comparable. `'all'`
   (the default) has no counterpart in either stack.

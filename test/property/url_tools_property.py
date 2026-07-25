@@ -331,14 +331,22 @@ def v1_json_string(text: str) -> str:
     return '"' + "".join(escaped) + '"'
 
 
-def v1_json_object(entries: dict[str, str]) -> str:
-    return "{" + ",".join(f"{v1_json_string(key)}:{v1_json_string(value)}" for key, value in entries.items()) + "}"
+def v1_json_object(entries: dict[str, str | None]) -> str:
+    return (
+        "{"
+        + ",".join(
+            f"{v1_json_string(key)}:{'null' if value is None else v1_json_string(value)}"
+            for key, value in entries.items()
+        )
+        + "}"
+    )
 
 
-# v1 compatibility anchor (law 7): CAST(query_params(u, 'last') AS JSON) is byte-for-byte what v1's
-# JSON-returning query_params wrote. v1's writer left the extension with the JSON return type, so the
-# anchor is held against the independent oracle above. The consumer's migration off the JSON spelling
-# is only verifiable while this holds.
+# v1 compatibility anchor (law 7): CAST(query_params(u, 'last') AS JSON) is what v1's JSON-returning
+# query_params wrote, with one deliberate departure — v1 spelled an empty value as "", and the MAP
+# writes NULL, so the JSON reads null. Everything else about the spelling (key order, compact
+# separators, escaping) is held byte-for-byte against the independent oracle above. The consumer's
+# migration off the JSON spelling is only verifiable while this holds.
 @PROPERTY_SETTINGS
 @example(url="https://example.com/path?utm_source=duckdb#top")
 @example(url="https://example.com/?a=1&a=2&b=%2B")
@@ -366,7 +374,9 @@ def test_raw_query_reparses_to_the_same_params(url: str) -> None:
     from_raw = read_params(f"query_params_from_string(url_query({literal}))")
     direct = read_params(f"query_params({literal})")
     if from_raw is None:
-        assert direct == {}, f"no query (unparseable URL) but query_params = {direct!r}"
+        # url_query was NULL, so there is no query to reparse — the URL does not parse, or it parses
+        # and carries none. Either way the parameters of a URL with no query are none.
+        assert direct == {}, f"no query to reparse but query_params = {direct!r}"
     else:
         assert from_raw == direct, f"the raw query parses to {from_raw!r}, query_params says {direct!r}"
 
@@ -384,7 +394,7 @@ URL_ACCESSORS = {
 
 # Accessor/struct agreement (law 4): each accessor is the corresponding url_components(u, 'raw')
 # field on every input — the relative-input NULLs (no scheme/host/port without an authority) and the
-# ''-for-absent convention included. The accessors exist to skip the other five fields, so this
+# NULL-for-empty convention included. The accessors exist to skip the other five fields, so this
 # property is what keeps the cheap spelling honest against the complete one.
 @PROPERTY_SETTINGS
 @example(url="https://sub.shop.co.uk:8443/p/x?a=1&b=%20&a=2#f")
@@ -441,9 +451,10 @@ def test_query_params_loose_total(url: str, mode: str) -> None:
 
 # Loose conservativity (law 6): query_params_loose only ever ADDS the parameters a fragment shaped
 # like a query carries. Where there is no such fragment — no fragment at all, a plain anchor — it is
-# query_params exactly, so a consumer can swap one for the other without auditing its URLs. A NULL
-# fragment is an unparseable input, which is where the two are allowed to differ (loose falls back on
-# the string's own shape).
+# query_params exactly, so a consumer can swap one for the other without auditing its URLs. An
+# unparseable input is where the two are allowed to differ (loose falls back on the string's own
+# shape), and it is asked for directly: a NULL fragment no longer identifies it, since a URL that
+# parses and carries no fragment answers NULL too.
 @PROPERTY_SETTINGS
 @example(url="https://example.com/?a=1&a=2#top")
 @example(url="https://example.com/?a=1&a=2")
@@ -451,9 +462,13 @@ def test_query_params_loose_total(url: str, mode: str) -> None:
 @given(url=url_inputs)
 def test_loose_is_conservative(url: str) -> None:
     literal = sql_literal(url)
+    unparseable = SESSION.read(f"url_components({literal}) IS NULL")
+    assert not isinstance(unparseable, UrlToolsSession.Errored), f"url_components errored: {unparseable.message}"
+    if unparseable != "false":
+        return
     fragment = SESSION.read(f"url_fragment({literal})")
     assert not isinstance(fragment, UrlToolsSession.Errored), f"url_fragment errored: {fragment.message}"
-    if fragment is None or "?" in fragment or "=" in fragment:
+    if fragment is not None and ("?" in fragment or "=" in fragment):
         return
     for mode in PARSED_QUERY_VALUES_MODES:
         loose = read_params(f"query_params_loose({literal}, '{mode}')")
@@ -501,7 +516,9 @@ def test_empty_separator_fails_loud(query: str) -> None:
 
 # Differential oracle: Python's urlencode emits WHATWG-compatible form encoding
 # ('+' for space, %XX for reserved bytes, UTF-8), so decoding its output must
-# reproduce the source dict exactly — including empty keys and empty values.
+# reproduce the source dict exactly — empty keys included. An empty VALUE is the one
+# thing the round trip does not return as it went in: the map writes it as NULL, so the
+# oracle carries the same collapse rather than the round trip pretending it does not happen.
 @PROPERTY_SETTINGS
 @example(params={"": "", "a": ""})
 @example(params={"q": "л 微", "emoji": "😀", "plus": "1+2=3", "amp": "a&b"})
@@ -509,7 +526,8 @@ def test_empty_separator_fails_loud(query: str) -> None:
 def test_urlencode_round_trip(params: dict[str, str]) -> None:
     encoded = urlencode(params)
     result = read_params(f"query_params_from_string({sql_literal(encoded)}, '&', 'last')")
-    assert result == params, f"urlencode({params!r}) = {encoded!r} decoded to {result!r}"
+    expected = {key: value or None for key, value in params.items()}
+    assert result == expected, f"urlencode({params!r}) = {encoded!r} decoded to {result!r}"
 
 
 PROPERTIES = [

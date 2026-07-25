@@ -12,14 +12,17 @@ SELECT query_param('https://x/?a=1&a=2', 'a'),
 ----
 2	1	2
 
-# A key present with an empty value is '', which is not the absent key's NULL.
-query IIII
-SELECT query_param('https://x/?flag&b=1', 'flag'),
-       query_param('https://x/?empty=&b=1', 'empty'),
+# An empty value is no value: a valueless key, a key with an empty value and an absent key all
+# answer NULL. The scalar draws no distinction between them — the map keeps the key, so a caller who
+# needs the distinction asks it there.
+query IIIII
+SELECT query_param('https://x/?flag&b=1', 'flag') IS NULL,
+       query_param('https://x/?empty=&b=1', 'empty') IS NULL,
        query_param('https://x/?b=1', 'a') IS NULL,
-       query_param('https://x/?flag&b=1', 'flag') IS NULL;
+       map_contains(query_params('https://x/?flag&b=1', 'last'), 'flag'),
+       map_contains(query_params('https://x/?b=1', 'last'), 'flag');
 ----
-(empty)	(empty)	true	false
+true	true	true	true	false
 
 # Values decode per WHATWG form semantics, keys included: '+' as space, percent-escapes, and
 # ill-formed UTF-8 sanitized to U+FFFD — the same repair the map keys get, so a repaired key is

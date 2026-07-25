@@ -90,6 +90,20 @@ SELECT query_params('https://example.com/path'),
 ----
 {}	{}	0	false	true
 
+# An empty value is written as NULL into the map's value vector, so its validity must not leak
+# from one row to the next: alternating rows that carry an empty value with rows that do not has to
+# keep both answers straight, across chunk boundaries.
+query IIII
+SELECT count(*) FILTER (WHERE m['a'] IS NULL),
+       count(*) FILTER (WHERE m['a'] IS NOT NULL),
+       count(*) FILTER (WHERE len(l['a']) = 1 AND l['a'][1] IS NULL),
+       count(*) FILTER (WHERE len(map_keys(m)) <> 1)
+FROM (SELECT query_params('https://e.com/p?a=' || CASE WHEN i % 2 = 0 THEN '' ELSE i::VARCHAR END, 'last') AS m,
+             query_params('https://e.com/p?a=' || CASE WHEN i % 2 = 0 THEN '' ELSE i::VARCHAR END, 'all') AS l
+      FROM range(5000) t(i));
+----
+2500	2500	2500	0
+
 # The axis selects the result type, so it must be a constant the binder can resolve to a known
 # mode; 'raw' belongs to url_components alone (query_params always parses).
 statement error

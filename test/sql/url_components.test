@@ -20,11 +20,24 @@ SELECT url_components('https://sub.shop.co.uk:8443/p/x?a=1&b=%20&a=2#f')
 ----
 true
 
-# Non-special scheme keeps its authority; absent query/fragment are '', not NULL.
+# Non-special scheme keeps its authority; an absent query/fragment is NULL, like every other empty
+# component.
 query I
 SELECT url_components('goal://counter/signup');
 ----
-{'scheme': goal, 'host': counter, 'port': NULL, 'path': /signup, 'query': '', 'fragment': ''}
+{'scheme': goal, 'host': counter, 'port': NULL, 'path': /signup, 'query': NULL, 'fragment': NULL}
+
+# An empty component is no component, whichever way it got that way: a URL with no authority (an
+# opaque path) has no host, a file URL with an empty host has none either, and an opaque path that
+# is itself empty is no path. A '?' or '#' with nothing behind it reads the same as carrying none.
+query IIIII
+SELECT url_components('mailto:a@b.com'),
+       url_components('file:///etc/hosts'),
+       url_components('foo:'),
+       (url_components('https://x/p?')).query IS NULL,
+       (url_components('https://x/p#')).fragment IS NULL;
+----
+{'scheme': mailto, 'host': NULL, 'port': NULL, 'path': a@b.com, 'query': NULL, 'fragment': NULL}	{'scheme': file, 'host': NULL, 'port': NULL, 'path': /etc/hosts, 'query': NULL, 'fragment': NULL}	{'scheme': foo, 'host': NULL, 'port': NULL, 'path': NULL, 'query': NULL, 'fragment': NULL}	true	true
 
 # Port is NULL when absent or equal to the scheme's default (WHATWG normalization, as ada
 # reports it); a non-special scheme has no default, so its port survives.
@@ -46,7 +59,7 @@ SELECT url_components('/p?a=1#f');
 query I
 SELECT url_components('/');
 ----
-{'scheme': NULL, 'host': NULL, 'port': NULL, 'path': /, 'query': '', 'fragment': ''}
+{'scheme': NULL, 'host': NULL, 'port': NULL, 'path': /, 'query': NULL, 'fragment': NULL}
 
 # Unparseable input is NULL, not an error: junk prose, invalid host, bare word.
 query III
@@ -152,6 +165,17 @@ SELECT cardinality((url_components('https://x/?%FF=1&%FE=2', 'last')).query_para
        (url_components('https://x/?%FF=1&%FE=2', 'all')).query_params[chr(65533)];
 ----
 1	2	1	[1, 2]
+
+# The empty-is-absent rule reaches the parameter values too: a valueless key and a key with an
+# empty value are one and the same NULL, in every mode. The KEY is not touched — a MAP key may not
+# be NULL, and '?=1' carries an empty key rather than a missing one.
+query IIII
+SELECT (url_components('https://x/?flag&empty=&a=1', 'last')).query_params,
+       (url_components('https://x/?flag&empty=&a=1', 'all')).query_params,
+       map_keys((url_components('https://x/?flag', 'last')).query_params),
+       (url_components('https://x/?=1', 'last')).query_params;
+----
+{flag=NULL, empty=NULL, a=1}	{flag=[NULL], empty=[NULL], a=[1]}	[flag]	{''=1}
 
 # A parseable URL with no query part yields an EMPTY map, not a NULL one; the NULL map belongs to
 # the NULL row of unparseable input.

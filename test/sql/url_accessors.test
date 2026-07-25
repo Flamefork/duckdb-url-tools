@@ -33,15 +33,27 @@ SELECT url_port('https://x.com:443/'),
 ----
 NULL	NULL	NULL	8443	443
 
-# A parseable URL that carries no query or fragment yields '', not NULL: the absent part of a URL
-# that exists is empty, and NULL is reserved for the URL that does not.
+# An empty component is no component: a URL carrying no query or fragment answers NULL, and one
+# carrying an empty one ('?' / '#') answers NULL too. No accessor ever hands back an empty string.
 query IIII
-SELECT url_query('https://x.com/p'),
-       url_fragment('https://x.com/p'),
+SELECT url_query('https://x.com/p') IS NULL,
+       url_fragment('https://x.com/p') IS NULL,
        url_query('https://x.com/p?') IS NULL,
        url_fragment('https://x.com/p#') IS NULL;
 ----
-(empty)	(empty)	false	false
+true	true	true	true
+
+# The same rule on the other two text components: a URL with no authority (an opaque path) has no
+# host, a file URL with an empty one has none either, and an opaque path that is itself empty is no
+# path. A host that is actually there survives.
+query IIIII
+SELECT url_host('mailto:a@b.com') IS NULL,
+       url_host('file:///etc/hosts') IS NULL,
+       url_path('foo:') IS NULL,
+       url_host('file://server/share'),
+       url_path('mailto:a@b.com');
+----
+true	true	true	server	a@b.com
 
 # Relative path input has no authority: scheme, host and port are NULL together, while path, query
 # and fragment parse per WHATWG.
@@ -72,6 +84,10 @@ SELECT count(*) FROM (VALUES
     ('http://user:pass@x.com/p;a?q=1#h'),
     ('https://кто.рф/путь?q=%D0%BB'),
     ('http://[::1]:8080/'),
+    ('https://x.com/p?'),
+    ('mailto:a@b.com'),
+    ('file:///etc/hosts'),
+    ('foo:'),
     ('/relative?c=d#e'),
     ('/'),
     ('//example.com/path'),
@@ -99,7 +115,8 @@ SELECT query_params_from_string(url_query('https://x.ru/?a=1&b=%20&a=2'), '&', '
 true	true
 
 # Bulk scan over mixed input classes: every accessor stays total across chunk boundaries and the
-# connection survives the junk rows.
+# connection survives the junk rows. Only the rows that carry a fragment count towards it — the
+# rows without one are NULL, not '', so a count is a count of URLs that have the component.
 statement ok
 CREATE TABLE mixed AS SELECT CASE i % 5
     WHEN 0 THEN 'junk ' || i
@@ -109,7 +126,8 @@ CREATE TABLE mixed AS SELECT CASE i % 5
     ELSE 'https://e.com/no-query' END AS u
 FROM range(10000) t(i);
 
-query IIII
-SELECT count(url_scheme(u)), count(url_port(u)), count(url_path(u)), count(url_fragment(u)) FROM mixed;
+query IIIII
+SELECT count(url_scheme(u)), count(url_port(u)), count(url_path(u)), count(url_query(u)), count(url_fragment(u))
+FROM mixed;
 ----
-4000	2000	6000	6000
+4000	2000	6000	4000	2000

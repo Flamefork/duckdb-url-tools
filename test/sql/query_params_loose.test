@@ -144,7 +144,7 @@ query II
 SELECT query_params_loose('???', 'last'),
        query_params_loose('page?', 'last');
 ----
-{?=''}	{}
+{?=NULL}	{}
 
 # The axis is bind-time — it selects the result type — so its errors are the same errors.
 statement error

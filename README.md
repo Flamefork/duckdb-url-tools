@@ -79,6 +79,31 @@ con.execute("LOAD './build/release/extension/url_tools/url_tools.duckdb_extensio
 
 ## Usage
 
+### Empty is `NULL`
+
+Nothing this extension returns is ever an empty string. A component a URL does not carry, a component it carries empty, and a parameter with no value all answer `NULL`:
+
+```sql
+SELECT url_query('https://example.com/p'), url_query('https://example.com/p?');
+-- NULL, NULL
+
+SELECT url_host('mailto:a@b.com'), url_host('file:///etc/hosts'), url_path('foo:');
+-- NULL, NULL, NULL
+
+SELECT query_params('https://example.com/?flag&empty=&a=1', 'last');
+-- {flag=NULL, empty=NULL, a=1}
+```
+
+The one empty string that survives is a **map key**, because there a key is present rather than missing (`?=1` → `{'': '1'}`) — and a `MAP` key may not be `NULL` in the first place. So a parameter that is present with no value keeps its key and drops only its value, and the distinction lives where it can be read:
+
+```sql
+SELECT map_contains(query_params('https://example.com/?flag', 'last'), 'flag'),  -- present
+       query_param('https://example.com/?flag', 'flag') IS NULL;                 -- no value
+-- true, true
+```
+
+`query_param` and `map[key]` therefore cannot tell an absent key from a valueless one; `map_contains` / `map_keys` can.
+
 ### Query parameter semantics
 
 `url_components`, `query_params`, `query_params_from_string`, `query_params_loose` and `query_param` all read the query through the same `query_values` axis. The axis selects **how values are reported**; the key set and its order (first occurrence) are the same in every mode, and every key appears exactly once.
@@ -104,7 +129,7 @@ SELECT query_params_from_string('a=1&b=2', query_values := 'last');   -- leaves 
 SELECT url_components('https://example.com/?id=1&id=2', query_values := 'all');
 ```
 
-Values decode per WHATWG form semantics: percent-escapes, and `+` as space. Percent-decoded bytes that are not valid UTF-8 are sanitized with U+FFFD, so the output is always valid UTF-8.
+Values decode per WHATWG form semantics: percent-escapes, and `+` as space. A pair without `=` is a key with no value, so `?flag` and `?flag=` are the same pair — and both values are `NULL` ([Empty is `NULL`](#empty-is-null)). Percent-decoded bytes that are not valid UTF-8 are sanitized with U+FFFD, so the output is always valid UTF-8.
 
 A `MAP` result carries the same object a JSON string would, without the serialize/parse round trip — and `CAST(m AS JSON)` still gives you the JSON spelling when you want it:
 
@@ -115,7 +140,7 @@ SELECT CAST(query_params_from_string('utm_source=yandex&plus=a+b', query_values 
 
 ### `url_components`
 
-Parses a URL into a `STRUCT` of its WHATWG components. Absolute URLs of any scheme yield all fields; relative paths (`/path?q=1`) yield `NULL` scheme/host/port; unparseable input yields `NULL`.
+Parses a URL into a `STRUCT` of its WHATWG components. Absolute URLs of any scheme yield all fields; relative paths (`/path?q=1`) yield `NULL` scheme/host/port; a component the URL does not carry is `NULL` ([Empty is `NULL`](#empty-is-null)); unparseable input yields `NULL`.
 
 ```sql
 SELECT url_components('https://example.com:8443/path?utm_source=duckdb&id=1&id=2#top');
@@ -126,7 +151,7 @@ Under the default `'raw'` mode the struct is `STRUCT(scheme, host, port USMALLIN
 
 ```sql
 SELECT url_components('/search?q=%D0%BB&tab=products', 'last');
--- {'scheme': NULL, 'host': NULL, 'port': NULL, 'path': /search, 'query_params': {q=л, tab=products}, 'fragment': ''}
+-- {'scheme': NULL, 'host': NULL, 'port': NULL, 'path': /search, 'query_params': {q=л, tab=products}, 'fragment': NULL}
 
 SELECT (url_components('https://example.com/?id=1&id=2', query_values := 'all')).query_params;
 -- {id=[1, 2]}
@@ -148,10 +173,10 @@ SELECT url_host('https://example.com:8443/path?a=1#top'), url_port('https://exam
 -- example.com, 8443
 
 SELECT url_path('/search?q=1'), url_scheme('/search?q=1'), url_query('https://example.com/p');
--- /search, NULL, ''
+-- /search, NULL, NULL
 ```
 
-Each accessor is exactly the same-named field of `url_components(url)`, NULLs included: `url_scheme` / `url_host` / `url_port` are `NULL` for a relative path, `url_query` / `url_fragment` are `''` on a parseable URL that carries none, and every accessor is `NULL` for unparseable input.
+Each accessor is exactly the same-named field of `url_components(url)`, NULLs included: `url_scheme` / `url_host` / `url_port` are `NULL` for a relative path, every component a URL does not carry is `NULL` (see [Empty is `NULL`](#empty-is-null)), and every accessor is `NULL` for unparseable input.
 
 ### `url_domain`
 
@@ -199,7 +224,7 @@ SELECT query_param('https://example.com/?utm_source=duckdb&id=1', 'utm_source');
 -- duckdb
 ```
 
-`query_values` is `'last'` (default) or `'first'`; `'all'` has no scalar result — use `query_params(url, 'all')` for that. An absent key yields `NULL`; a key present with an empty value yields `''`.
+`query_values` is `'last'` (default) or `'first'`; `'all'` has no scalar result — use `query_params(url, 'all')` for that. An absent key, a valueless key (`?flag`) and a key with an empty value (`?a=`) all yield `NULL` — see [Empty is `NULL`](#empty-is-null) for how to tell them apart when it matters.
 
 ### `query_params_from_string`
 
