@@ -15,16 +15,25 @@ When a new DuckDB stable release comes out:
    `duckdb_version` and `ci_tools_version` inputs. All six carry the same tag,
    so a global search-and-replace of the old tag is the reliable way.
    (`Sanitizer.yml` pins no version — it builds DuckDB from the submodule.)
-3. Rebuild and run the full gate: `uv run make verify`.
-4. Run the property harness against the fresh build:
+3. Pin the Python `duckdb` package to the same version in `pyproject.toml` and
+   relock (`uv lock`). A built extension loads only into the exact version it
+   was built for, so a bumped submodule with a stale package leaves the bench
+   harness — the one tool that drives DuckDB from Python — unable to load
+   `url_tools` at all.
+4. Rebuild and run the full gate: `uv run make verify`.
+5. Run the property harness against the fresh build:
    `uv run --frozen test/property/url_tools_property.py`.
-5. If the build breaks: extensions link against DuckDB's internal C++ API,
+6. Run the bench harness once (`uv run --frozen python bench/run_benchmarks.py
+   --sizes 100k --runs 1 --filter host`): its correctness gate is what proves
+   the new package and the new binary actually agree.
+7. If the build breaks: extensions link against DuckDB's internal C++ API,
    which is not stable across releases. To find what changed, use DuckDB's
    [release notes](https://github.com/duckdb/duckdb/releases), the history of
    [core extension patches](https://github.com/duckdb/duckdb/commits/main/.github/patches/extensions),
    and the git history of the relevant header in `duckdb/src/include/`.
-6. Commit the submodule bumps and the workflow edits together, then push and
-   confirm the distribution pipeline is green.
+8. Commit the submodule bumps, the workflow edits and the `pyproject.toml` /
+   `uv.lock` pin together, then push and confirm the distribution pipeline is
+   green.
 
 ## Vendored dependencies (third_party/)
 

@@ -8,7 +8,10 @@ dependencies = [
     "black>=25.9.0",
     "clang-format==11.0.1",
     "cmake-format>=0.6.13",
-    "duckdb>=1.5.4",
+    # Pinned to the `duckdb/` submodule's tag, not floated: a built extension loads only into the
+    # exact version it was built for, so the bench harness (the one tool that drives DuckDB from
+    # Python) breaks the moment the two drift. Bump this in the same commit as the submodule.
+    "duckdb==1.5.5",
     "hypothesis>=6.100",
 ]
 
